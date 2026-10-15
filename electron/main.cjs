@@ -56,6 +56,12 @@ ipcMain.handle('files:show-in-folder', (_event, filePath) => {
   shell.showItemInFolder(filePath)
   return true
 })
+ipcMain.handle('shell:open-external', async (_event, value) => {
+  const url = new URL(String(value))
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('只允许打开 HTTP 或 HTTPS 链接')
+  await shell.openExternal(url.toString())
+  return true
+})
 ipcMain.handle('files:save', async (_event, { name, data, directory, sourcePath }) => {
   let targetDirectory = directory
   if (!targetDirectory && sourcePath) targetDirectory = path.dirname(sourcePath)

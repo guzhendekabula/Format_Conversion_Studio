@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('desktop', {
   clearHistory: () => ipcRenderer.invoke('jobs:clear-history'),
   deleteHistory: (id) => ipcRenderer.invoke('jobs:delete-history', id),
   showItemInFolder: (filePath) => ipcRenderer.invoke('files:show-in-folder', filePath),
+  openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   onJobEvent: (channel, listener) => {
     const allowed = new Set(['jobs:queued', 'jobs:started', 'jobs:progress', 'jobs:file', 'jobs:done'])
     if (!allowed.has(channel)) throw new Error('Invalid event channel')

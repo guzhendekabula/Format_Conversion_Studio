@@ -15,6 +15,7 @@ declare global {
       clearHistory: () => Promise<boolean>
       deleteHistory: (id: string) => Promise<boolean>
       showItemInFolder: (path: string) => Promise<boolean>
+      openExternal: (url: string) => Promise<boolean>
       onJobEvent: (channel: 'jobs:queued' | 'jobs:started' | 'jobs:progress' | 'jobs:file' | 'jobs:done', listener: (payload: JobEvent) => void) => () => void
     }
   }
