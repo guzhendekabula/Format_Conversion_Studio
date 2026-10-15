@@ -1,0 +1,10 @@
+node_modules/
+dist/
+release/
+conversion-engines/python/.venv/
+conversion-engines/python/build/
+conversion-engines/python/dist/
+conversion-engines/poppler/dist/
+__pycache__/
+*.pyc
+需求文档.md
