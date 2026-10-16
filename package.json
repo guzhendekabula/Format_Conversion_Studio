@@ -56,6 +56,13 @@
       { "from": "conversion-engines/poppler/dist", "to": "engines/poppler" }
     ],
     "mac": { "target": ["dmg", "zip", "dir"], "icon": "build/icon.svg" },
-    "win": { "target": ["nsis"], "icon": "build/icon.svg" }
+    "win": {
+      "target": ["nsis"],
+      "icon": "build/icon.svg",
+      "nsis": {
+        "oneClick": false,
+        "allowToChangeInstallationDirectory": true
+      }
+    }
   }
 }
