@@ -6,7 +6,15 @@ $archive = Join-Path $env:TEMP "poppler-$version.zip"
 $extract = Join-Path $env:TEMP "poppler-$version"
 $stage = Join-Path $root 'conversion-engines/poppler/dist/win32'
 Invoke-WebRequest "https://github.com/oschwartz10612/poppler-windows/releases/download/v$version/Release-$version.zip" -OutFile $archive
-if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha256) { throw 'Poppler archive SHA-256 mismatch' }
+$hasher = [System.Security.Cryptography.SHA256]::Create()
+$stream = [System.IO.File]::OpenRead($archive)
+try {
+  $actualSha256 = [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+} finally {
+  $stream.Dispose()
+  $hasher.Dispose()
+}
+if ($actualSha256 -ne $sha256) { throw 'Poppler archive SHA-256 mismatch' }
 if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
 Expand-Archive $archive -DestinationPath $extract
 $library = Get-ChildItem $extract -Directory -Recurse | Where-Object { $_.Name -eq 'Library' } | Select-Object -First 1
