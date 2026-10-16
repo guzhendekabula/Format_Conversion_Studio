@@ -1,0 +1,44 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build the Windows Python worker
+        run: npm run engines:python:win
+
+      - name: Stage Windows Poppler binaries
+        run: npm run engines:poppler:win
+
+      - name: Build the Windows installer
+        run: npm run dist:win
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Format-Conversion-Studio-Windows
+          path: dist/*.exe
+          if-no-files-found: error
