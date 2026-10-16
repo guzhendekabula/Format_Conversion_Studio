@@ -48,13 +48,14 @@
   "build": {
     "appId": "studio.formatconversion.app",
     "productName": "Format Conversion Studio",
+    "directories": { "buildResources": "build" },
     "asarUnpack": ["node_modules/ffmpeg-static/**"],
     "files": ["dist/**/*", "electron/**/*", "node_modules/ffmpeg-static/**/*", "package.json"],
     "extraResources": [
       { "from": "conversion-engines/python/dist", "to": "engines/python" },
       { "from": "conversion-engines/poppler/dist", "to": "engines/poppler" }
     ],
-    "mac": { "target": ["dmg", "zip", "dir"] },
-    "win": { "target": ["nsis"] }
+    "mac": { "target": ["dmg", "zip", "dir"], "icon": "build/icon.svg" },
+    "win": { "target": ["nsis"], "icon": "build/icon.svg" }
   }
 }
