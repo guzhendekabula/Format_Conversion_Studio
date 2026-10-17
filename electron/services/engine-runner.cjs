@@ -2,6 +2,7 @@ const { spawn } = require('node:child_process')
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const { app } = require('electron')
+const { getFFmpegPath } = require('./ffmpeg-path.cjs')
 
 const SOURCE_ROOT = path.resolve(__dirname, '../..')
 
@@ -26,8 +27,7 @@ function outputStem(input, options, extension) {
 }
 
 function ffmpegPath() {
-  if (app.isPackaged) return require('ffmpeg-static')
-  return require('ffmpeg-static')
+  return getFFmpegPath()
 }
 
 function workerPath() {

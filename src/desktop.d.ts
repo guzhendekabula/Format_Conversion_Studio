@@ -8,6 +8,9 @@ declare global {
       selectFolderFiles: (extensions: string) => Promise<{ path: string; name: string; size: number }[]>
       readFile: (path: string) => Promise<number[]>
       registerMediaPreview: (path: string) => Promise<string>
+      createTrimPreview: (path: string, segments: { start: number; end: number }[], isVideo: boolean) => Promise<{ url: string; duration: number }>
+      releaseMediaPreview: (previewUrl: string) => Promise<boolean>
+      getMediaDuration: (path: string) => Promise<number>
       analyzeMedia: (path: string) => Promise<{ duration: number; hasAudio: boolean; peaks: number[] }>
       saveFile: (payload: { name: string; data: number[]; directory?: string; sourcePath?: string }) => Promise<boolean>
       getPathForFile: (file: File) => string

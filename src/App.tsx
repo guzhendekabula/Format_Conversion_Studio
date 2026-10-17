@@ -8,7 +8,7 @@ import './App.css'
 
 type Category = '音视频' | '图片' | 'PDF' | 'Excel' | 'Word' | '开发工具'
 type ClipSegment = { start: number | null; end: number | null }
-type LocalFile = { name: string; outputName?: string; segments?: ClipSegment[]; size: number; type: string; file?: File; path?: string; status: 'ready' | 'queued' | 'running' | 'done' | 'error'; detail?: string }
+type LocalFile = { name: string; outputName?: string; segments?: ClipSegment[]; duration?: number; durationLoading?: boolean; durationError?: string; size: number; type: string; file?: File; path?: string; status: 'ready' | 'queued' | 'running' | 'done' | 'error'; detail?: string }
 type Tool = { title: string; desc: string; from: string; to: string }
 const tools: Record<Category, Tool[]> = {
   音视频: [{ title: '视频提取音频', desc: '从视频文件中提取音轨', from: 'MP4 / MOV / MKV / AVI', to: 'MP3' }, { title: '音频格式转换', desc: '转换常见音频格式与音质', from: 'MP3 / WAV / M4A / AAC / FLAC / OGG', to: 'WAV / MP3' }, { title: '音频裁剪', desc: '设置并拼接要保留的音频片段', from: 'MP3 / WAV / M4A / AAC / FLAC / OGG', to: '保持原格式' }, { title: '视频格式转换', desc: '在常用视频容器之间转换', from: 'MP4 / MOV / MKV / AVI / WEBM', to: 'MP4 / MOV / MKV / AVI / WEBM' }, { title: '视频裁剪', desc: '设置并拼接要保留的视频片段', from: 'MP4 / MOV / MKV / AVI / WEBM', to: '保持原格式' }, { title: 'GIF 转换', desc: '视频与动图互转，设置帧率和尺寸', from: 'GIF / MP4', to: 'MP4 / GIF' }],
@@ -94,6 +94,19 @@ function App() {
   const clipPreviewingRef = useRef(false)
   const [clipPreviewActive, setClipPreviewActive] = useState(false)
   const previewPlayheadFrameRef = useRef<number | null>(null)
+  const [trimResultPreviewIndex, setTrimResultPreviewIndex] = useState<number | null>(null)
+  const [trimResultPreviewUrl, setTrimResultPreviewUrl] = useState('')
+  const [trimResultPreviewLoading, setTrimResultPreviewLoading] = useState(false)
+  const [trimResultPreviewError, setTrimResultPreviewError] = useState('')
+  const [trimResultPreviewDuration, setTrimResultPreviewDuration] = useState(0)
+  const [trimResultPreviewPlaying, setTrimResultPreviewPlaying] = useState(false)
+  const trimResultMediaRef = useRef<HTMLMediaElement>(null)
+  const trimResultSegmentsRef = useRef<ClipSegment[]>([])
+  const trimResultSegmentIndexRef = useRef(0)
+  const trimResultRequestIdRef = useRef(0)
+  const trimResultElapsedRef = useRef<HTMLSpanElement>(null)
+  const trimResultSeekRef = useRef<HTMLInputElement>(null)
+  const trimResultFrameRef = useRef<number | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const devImageRef = useRef<HTMLInputElement>(null)
   const dragIndex = useRef<number | null>(null)
@@ -191,6 +204,137 @@ function App() {
       await media.play()
       setClipPreviewActive(true)
     } catch (error) { clipPreviewingRef.current = false; setClipPreviewActive(false); message.error((error as Error).message || '片段试听失败') }
+  }
+
+  const syncTrimResultProgress = (media: HTMLMediaElement) => {
+    const segments = trimResultSegmentsRef.current
+    if (!segments.length) return
+    const index = trimResultSegmentIndexRef.current
+    const elapsedBefore = segments.slice(0, index).reduce((sum, segment) => sum + Number(segment.end) - Number(segment.start), 0)
+    const current = segments[index]
+    const elapsed = Math.min(trimResultPreviewDuration, elapsedBefore + Math.max(0, media.currentTime - Number(current.start)))
+    if (trimResultElapsedRef.current) trimResultElapsedRef.current.textContent = `${elapsed.toFixed(3)} 秒`
+    if (trimResultSeekRef.current) trimResultSeekRef.current.value = String(elapsed)
+  }
+
+  const seekTrimResultPreview = (elapsed: number) => {
+    const media = trimResultMediaRef.current
+    const segments = trimResultSegmentsRef.current
+    if (!media || !segments.length) return
+    let remaining = Math.max(0, Math.min(elapsed, trimResultPreviewDuration))
+    let index = 0
+    while (index < segments.length - 1 && remaining > Number(segments[index].end) - Number(segments[index].start)) {
+      remaining -= Number(segments[index].end) - Number(segments[index].start)
+      index += 1
+    }
+    trimResultSegmentIndexRef.current = index
+    media.currentTime = Number(segments[index].start) + remaining
+    if (trimResultElapsedRef.current) trimResultElapsedRef.current.textContent = `${Math.min(elapsed, trimResultPreviewDuration).toFixed(3)} 秒`
+  }
+
+  const openTrimResultPreview = async (file: LocalFile, fileIndex: number) => {
+    const segments = (file.segments || []).map(segment => ({ start: Number(segment.start), end: Number(segment.end) })).sort((a, b) => a.start - b.start)
+    if (!segments.length || segments.some(segment => !Number.isFinite(segment.start) || !Number.isFinite(segment.end) || segment.start < 0 || segment.end <= segment.start)) {
+      message.warning('请先为所有片段填写有效的开始和结束时间')
+      return
+    }
+    if (segments.some((segment, index) => index > 0 && segment.start < segments[index - 1].end)) {
+      message.warning('保留片段不能重叠，请调整时间范围后预览')
+      return
+    }
+    const sourcePath = file.path || (file.file ? window.desktop?.getPathForFile(file.file) : '')
+    if (!sourcePath || !window.desktop?.createTrimPreview) {
+      message.error('片段预览需要在桌面应用中打开本地文件')
+      return
+    }
+    const requestId = ++trimResultRequestIdRef.current
+    setTrimResultPreviewIndex(fileIndex)
+    setTrimResultPreviewUrl('')
+    setTrimResultPreviewError('')
+    setTrimResultPreviewLoading(true)
+    setTrimResultPreviewPlaying(false)
+    try {
+      const preview = await window.desktop.createTrimPreview(sourcePath, segments, isVideoTrim)
+      if (requestId !== trimResultRequestIdRef.current) {
+        await window.desktop.releaseMediaPreview(preview.url)
+        return
+      }
+      trimResultSegmentsRef.current = [{ start: 0, end: preview.duration }]
+      trimResultSegmentIndexRef.current = 0
+      setTrimResultPreviewDuration(preview.duration)
+      setTrimResultPreviewUrl(preview.url)
+      setTrimResultPreviewLoading(false)
+    } catch (error) {
+      if (requestId !== trimResultRequestIdRef.current) return
+      setTrimResultPreviewError((error as Error).message || '无法打开媒体预览')
+      setTrimResultPreviewLoading(false)
+    }
+  }
+
+  const closeTrimResultPreview = () => {
+    trimResultRequestIdRef.current += 1
+    trimResultMediaRef.current?.pause()
+    if (trimResultFrameRef.current !== null) cancelAnimationFrame(trimResultFrameRef.current)
+    trimResultFrameRef.current = null
+    if (trimResultPreviewUrl && window.desktop?.releaseMediaPreview) void window.desktop.releaseMediaPreview(trimResultPreviewUrl)
+    setTrimResultPreviewPlaying(false)
+    setTrimResultPreviewIndex(null)
+    setTrimResultPreviewUrl('')
+  }
+
+  const handleTrimResultTimeUpdate = (media: HTMLMediaElement) => {
+    const segments = trimResultSegmentsRef.current
+    if (!segments.length) return
+    const index = trimResultSegmentIndexRef.current
+    if (index >= segments.length) return
+    const isLastSegment = index === segments.length - 1
+    const reachedSegmentEnd = isLastSegment
+      ? media.ended || media.currentTime >= Number(segments[index].end)
+      : media.currentTime >= Number(segments[index].end) - 0.025
+    if (reachedSegmentEnd) {
+      if (index < segments.length - 1) {
+        trimResultSegmentIndexRef.current = index + 1
+        media.currentTime = Number(segments[index + 1].start)
+      } else {
+        // Keep the completed position visible, but mark playback as finished so
+        // the next Play action can restart at the first retained segment.
+        trimResultSegmentIndexRef.current = segments.length
+        if (trimResultElapsedRef.current) trimResultElapsedRef.current.textContent = `${trimResultPreviewDuration.toFixed(3)} 秒`
+        if (trimResultSeekRef.current) trimResultSeekRef.current.value = String(trimResultPreviewDuration)
+        media.pause()
+        return
+      }
+    }
+    syncTrimResultProgress(media)
+  }
+
+  const animateTrimResultProgress = () => {
+    if (trimResultFrameRef.current !== null) cancelAnimationFrame(trimResultFrameRef.current)
+    const update = () => {
+      const media = trimResultMediaRef.current
+      if (!media || media.paused || media.ended) { trimResultFrameRef.current = null; return }
+      handleTrimResultTimeUpdate(media)
+      if (!media.paused) trimResultFrameRef.current = requestAnimationFrame(update)
+    }
+    trimResultFrameRef.current = requestAnimationFrame(update)
+  }
+
+  const toggleTrimResultPlayback = async () => {
+    const media = trimResultMediaRef.current
+    const segments = trimResultSegmentsRef.current
+    if (!media || !segments.length) return
+    if (!media.paused) { media.pause(); return }
+    try {
+      const index = trimResultSegmentIndexRef.current
+      const current = segments[index]
+      if (index >= segments.length || media.currentTime >= Number(current.end) || media.currentTime < Number(current.start)) {
+        trimResultSegmentIndexRef.current = 0
+        media.currentTime = Number(segments[0].start)
+        if (trimResultElapsedRef.current) trimResultElapsedRef.current.textContent = '0.000 秒'
+        if (trimResultSeekRef.current) trimResultSeekRef.current.value = '0'
+      }
+      await media.play()
+    } catch (error) { message.error((error as Error).message || '预览播放失败') }
   }
 
   const animatePreviewPlayhead = () => {
@@ -296,6 +440,22 @@ function App() {
     const choices = nextCategory === '开发工具' ? [] : nextCategory === '图片' ? (nextTool.title === 'ICO 生成' ? ['ICO'] : nextTool.title === '图片压缩' ? ['JPG', 'WEBP', 'PNG'] : ['PNG', 'JPG', 'WEBP']) : nextCategory === '音视频' ? (nextTool.title === '音频裁剪' || nextTool.title === '视频裁剪' ? [] : nextTool.title === '视频提取音频' ? ['MP3'] : nextTool.title === '音频格式转换' ? ['MP3', 'WAV'] : nextTool.title === 'GIF 转换' ? ['MP4', 'GIF'] : ['MP4', 'MOV', 'MKV', 'AVI', 'WEBM']) : nextCategory === 'PDF' ? (nextTool.title === 'PDF 转图片' ? ['PNG', 'JPG'] : ['PDF']) : nextCategory === 'Excel' ? (nextTool.title === 'CSV 转换' ? ['CSV', 'XLSX'] : ['JSON', 'XLSX']) : nextTool.title === 'DOCX 转 TXT' ? ['TXT'] : ['MD']
     if (choices.length) setOutputFormat(choices[0])
   }
+  const loadTrimDurations = async (addedFiles: LocalFile[]) => {
+    if (!isMediaTrim || !window.desktop?.getMediaDuration) return
+    const seen = new Set<string>()
+    for (const file of addedFiles) {
+      if (!file.path || seen.has(file.path)) continue
+      seen.add(file.path)
+      setFiles(current => current.map(item => item.path === file.path ? { ...item, durationLoading: true, durationError: undefined } : item))
+      try {
+        const duration = await window.desktop!.getMediaDuration(file.path)
+        setFiles(current => current.map(item => item.path === file.path ? { ...item, duration, durationLoading: false, durationError: undefined } : item))
+      } catch (error) {
+        const durationError = (error as Error).message || '无法读取文件时长'
+        setFiles(current => current.map(item => item.path === file.path ? { ...item, durationLoading: false, durationError } : item))
+      }
+    }
+  }
   const addFiles = async (list: FileList | File[]) => {
     const all = Array.from(list)
     const accepted = all.filter(file => extensions.split(',').some(suffix => file.name.toLowerCase().endsWith(suffix)))
@@ -306,6 +466,7 @@ function App() {
       return { name: file.name, outputName: `${file.name.replace(/\.[^.]+$/, '')}${isMediaTrim ? '_trim' : ''}`, segments: isMediaTrim ? [{ start: 0, end: 1 }] : undefined, size: file.size, type: file.type, file, path, status: 'ready' as const }
     })
     setFiles(current => [...current, ...mapped])
+    void loadTrimDurations(mapped)
     if (category === 'Excel' && accepted.length) {
       const suffix = accepted[0].name.split('.').pop()?.toLowerCase()
       setOutputFormat(tool.title === 'CSV 转换' ? suffix === 'csv' ? 'XLSX' : 'CSV' : suffix === 'json' ? 'XLSX' : 'JSON')
@@ -314,13 +475,19 @@ function App() {
   const browse = async () => {
     if (window.desktop?.selectFiles) {
       const selected = await window.desktop.selectFiles(extensions)
-      if (selected.length) setFiles(current => [...current, ...selected.map(file => ({ ...file, outputName: `${file.name.replace(/\.[^.]+$/, '')}${isMediaTrim ? '_trim' : ''}`, segments: isMediaTrim ? [{ start: 0, end: 1 }] : undefined, type: '', status: 'ready' as const }))])
+      if (selected.length) {
+        const mapped = selected.map(file => ({ ...file, outputName: `${file.name.replace(/\.[^.]+$/, '')}${isMediaTrim ? '_trim' : ''}`, segments: isMediaTrim ? [{ start: 0, end: 1 }] : undefined, type: '', status: 'ready' as const }))
+        setFiles(current => [...current, ...mapped])
+        void loadTrimDurations(mapped)
+      }
     } else fileRef.current?.click()
   }
   const browseFolder = async () => {
     if (!window.desktop?.selectFolderFiles) { message.info('文件夹导入需要在 Electron 桌面模式中使用'); return }
     const selected = await window.desktop.selectFolderFiles(extensions)
-    setFiles(current => [...current, ...selected.map(file => ({ ...file, outputName: `${file.name.replace(/\.[^.]+$/, '')}${isMediaTrim ? '_trim' : ''}`, segments: isMediaTrim ? [{ start: 0, end: 1 }] : undefined, type: '', status: 'ready' as const }))])
+    const mapped = selected.map(file => ({ ...file, outputName: `${file.name.replace(/\.[^.]+$/, '')}${isMediaTrim ? '_trim' : ''}`, segments: isMediaTrim ? [{ start: 0, end: 1 }] : undefined, type: '', status: 'ready' as const }))
+    setFiles(current => [...current, ...mapped])
+    void loadTrimDurations(mapped)
     if (selected.length) message.success(`已添加 ${selected.length} 个文件`)
   }
   const outputFolder = async () => {
@@ -444,6 +611,16 @@ function App() {
     resize: { mode: resizeMode, percent: resizePercent, width: resizeWidth, height: resizeHeight },
     ...(targetBytesByPath ? { targetBytesByPath } : {}),
   })
+  const trimSegmentError = (file: LocalFile, segmentIndex: number) => {
+    const segment = file.segments?.[segmentIndex]
+    if (!segment) return ''
+    if (segment.start === null || segment.end === null) return segment.start === null && segment.end === null ? '' : '请填写开始和结束时间'
+    if (!Number.isFinite(segment.start) || !Number.isFinite(segment.end) || segment.start < 0) return '时间必须是有效的非负数'
+    if (segment.end <= segment.start) return '结束时间必须大于开始时间'
+    if (file.duration !== undefined && segment.end > file.duration) return `结束时间超过文件时长（${file.duration.toFixed(3)} 秒）`
+    const overlaps = (file.segments || []).some((other, index) => index !== segmentIndex && other.start !== null && other.end !== null && segment.start! < other.end && segment.end! > other.start)
+    return overlaps ? '保留片段不能重叠' : ''
+  }
   const submitTask = async () => {
     if (isDev) { void doDeveloperAction(tool.title === 'JSON 工具' ? '格式化' : 'Encode'); return }
     if (!files.length) { message.warning('请先添加要转换的文件'); return }
@@ -458,11 +635,14 @@ function App() {
       }
       if (isMediaTrim) {
         for (const file of files) {
+          if (file.durationLoading) { message.warning(`正在读取「${file.name}」的文件时长，请稍后再转换`); return }
+          if (file.durationError || file.duration === undefined) { message.warning(`无法读取「${file.name}」的文件时长，暂时不能裁剪`); return }
           const segments = file.segments || []
           if (!segments.length) { message.warning(`请为「${file.name}」至少添加一个保留片段`); return }
           if (segments.some(segment => segment.start === null || segment.end === null || !Number.isFinite(segment.start) || !Number.isFinite(segment.end) || segment.start < 0 || segment.end <= segment.start)) {
             message.warning(`「${file.name}」的片段时间无效，请检查开始和结束秒数`); return
           }
+          if (segments.some(segment => Number(segment.end) > file.duration!)) { message.warning(`「${file.name}」的片段结束时间超过文件时长（${file.duration.toFixed(3)} 秒）`); return }
           const sorted = [...segments].sort((a, b) => Number(a.start) - Number(b.start))
           if (sorted.some((segment, index) => index > 0 && Number(segment.start) < Number(sorted[index - 1].end))) {
             message.warning(`「${file.name}」的保留片段不能重叠`); return
@@ -515,7 +695,7 @@ function App() {
         <section className="workspace-card"><div className="workspace-head"><div><div className="task-title"><span className="task-dot" />{tool.title}</div><p>{tool.desc}</p></div><button className="more-btn">•••</button></div>
           {isDev ? <div className="dev-workspace"><div className="editor-head"><span>输入内容</span><span className="editor-hint">{tool.title === 'Base64 工具' && base64InputRef.current ? '大型内容已暂存，不会完整显示在输入框中' : '在此粘贴或输入内容'}</span></div><Input.TextArea value={input} onChange={event => { base64InputRef.current = null; setInput(event.target.value) }} onPaste={event => { if (tool.title !== 'Base64 工具') return; const pasted = event.clipboardData.getData('text'); if (pasted.length < 16000) return; event.preventDefault(); base64InputRef.current = pasted; setInput(`已暂存大型 Base64 内容（约 ${(pasted.length * 0.75 / 1024 / 1024).toFixed(1)} MB），可点击“Base64 → 图片”解码`) }} placeholder={tool.title === 'JSON 工具' ? '{\n  "name": "Format Studio",\n  "local": true\n}' : '在此粘贴或输入内容…'} autoSize={{ minRows: 7, maxRows: 12 }} className="code-input"/><input ref={devImageRef} hidden type="file" accept="image/*" onChange={event => { if (event.target.files?.[0]) void selectBase64Image(event.target.files[0]); event.target.value = '' }}/><div className="editor-actions">{tool.title === 'JSON 工具' ? <>{runDev('格式化')}{runDev('压缩')}{runDev('校验')}</> : tool.title === 'URL 工具' ? <>{runDev('Encode')}{runDev('Decode')}</> : tool.title === 'Base64 工具' ? <>{runDev('Encode')}{runDev('Decode')}<Button onClick={() => window.desktop?.selectFiles ? void selectBase64Image() : devImageRef.current?.click()}>选择图片 → Base64</Button><Button onClick={decodeBase64Image}>Base64 → 图片</Button></> : tool.title === 'Hash 工具' ? <>{runDev('MD5')}{runDev('SHA1')}{runDev('SHA256')}</> : tool.title === 'YAML 转换' ? <>{runDev('JSON → YAML')}{runDev('YAML → JSON')}</> : <>{runDev('XML → JSON')}{runDev('JSON → XML')}</>}<Button onClick={() => { base64InputRef.current = null; setInput(''); setResult('') }}>清空</Button></div>{result && <div className={`result-box ${result.startsWith('处理失败') ? 'error' : ''}`}><div className="result-title">输出结果 <span><button onClick={() => { void navigator.clipboard.writeText(result); message.success('已复制') }}>复制</button>{result.startsWith('data:image/') && <button onClick={() => void saveBase64Image()}>保存图片</button>}</span></div>{result.startsWith('data:image/') ? <><img src={result} alt="Base64 解码图片" style={{ maxWidth: 240, maxHeight: 180, display: 'block', marginTop: 8 }}/><pre>{result.slice(0, 100)}…</pre></> : <pre>{tool.title === 'Base64 工具' && result.length > 8000 ? `${result.slice(0, 8000)}…\n\n（内容较长，已仅显示预览；复制按钮可复制完整结果）` : result}</pre>}</div>}</div> : <><div className={`dropzone ${files.length ? 'compact' : ''}`} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); addFiles(event.dataTransfer.files) }} onClick={() => void browse()}><div className="upload-icon"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 15.5v3A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-3"/></svg></div><b>拖放文件到这里，或 <span>浏览文件</span></b><small>支持 {extensions.replaceAll('.', '').toUpperCase().replaceAll(',', ' · ')}，可一次选择多个文件</small><input ref={fileRef} hidden type="file" multiple accept={extensions} onChange={event => { if (event.target.files) addFiles(event.target.files); event.target.value = '' }}/></div>
             <div className="file-list-head"><span>待处理文件 <b>{files.length}</b></span><div className="head-actions"><button onClick={() => void browse()}>＋ 添加文件</button><button onClick={() => void browseFolder()}>＋ 添加文件夹</button><button onClick={() => setFiles([])} disabled={!files.length}>清空列表</button></div></div>
-            {files.length ? <div className={`file-list ${isMediaTrim ? 'trim-file-list' : ''}`}>{files.map((file, index) => <div className="file-item" key={`${file.path || file.name}-${index}`}><div className="file-row" draggable onDragStart={() => { dragIndex.current = index }} onDragOver={event => event.preventDefault()} onDrop={() => { if (dragIndex.current !== null) moveFile(dragIndex.current, index); dragIndex.current = null }} title={file.detail}><div className={`file-badge ${ext(file.name).toLowerCase()}`}>{ext(file.name).slice(0, 4)}</div><div className="file-meta"><b>{file.name}</b><small>{fmtSize(file.size)} <span>·</span> {ext(file.name)}</small></div><div className="file-output-name"><Input aria-label={`${file.name} 的输出文件名`} value={file.outputName ?? ''} onChange={event => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, outputName: event.target.value } : item))} placeholder="输出文件名" addonAfter={`.${isMediaTrim ? ext(file.name).toLowerCase() : outputFormat.toLowerCase()}`} size="small" disabled={file.status !== 'ready'}/></div><div className={`file-status ${file.status}`}>{file.status === 'ready' ? '就绪' : file.status === 'queued' ? '排队中' : file.status === 'running' ? '处理中' : file.status === 'done' ? '已完成' : <button onClick={() => { setErrorDetail(file.detail || '未知错误'); setErrorModal(true) }}>查看错误</button>}</div><button className="remove-file" onClick={() => setFiles(current => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></div>{isMediaTrim && <div className="trim-segments"><div className="trim-segments-title">保留片段 <small>按时间先后拼接 · 单位：秒</small></div>{(file.segments || []).map((segment, segmentIndex) => <div className="trim-segment-row" key={segmentIndex}><InputNumber aria-label="片段开始秒数" min={0} step={0.1} precision={3} placeholder="开始" addonAfter="秒" value={segment.start} onChange={value => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).map((part, partIndex) => partIndex === segmentIndex ? { ...part, start: value } : part) } : item))}/><span>至</span><InputNumber aria-label="片段结束秒数" min={0} step={0.1} precision={3} placeholder="结束" addonAfter="秒" value={segment.end} onChange={value => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).map((part, partIndex) => partIndex === segmentIndex ? { ...part, end: value } : part) } : item))}/><Button size="small" className="trim-visual-button" onClick={() => setVisualTrim({ fileIndex: index, segmentIndex })}>可视化选择</Button>{(file.segments || []).length > 1 && <Tooltip title="删除片段"><button className="trim-segment-remove" aria-label="删除片段" onClick={() => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).filter((_, partIndex) => partIndex !== segmentIndex) } : item))}>×</button></Tooltip>}</div>)}<Tooltip title="添加保留片段"><button className="trim-segment-add" aria-label="添加保留片段" onClick={() => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: [...(item.segments || []), { start: null, end: null }] } : item))}><PlusCircleOutlined/></button></Tooltip></div>}</div>)}</div> : <div className="empty-queue">文件将显示在这里 <span>⌄</span></div>}
+            {files.length ? <div className={`file-list ${isMediaTrim ? 'trim-file-list' : ''}`}>{files.map((file, index) => <div className="file-item" key={`${file.path || file.name}-${index}`}><div className="file-row" draggable onDragStart={() => { dragIndex.current = index }} onDragOver={event => event.preventDefault()} onDrop={() => { if (dragIndex.current !== null) moveFile(dragIndex.current, index); dragIndex.current = null }} title={file.detail}><div className={`file-badge ${ext(file.name).toLowerCase()}`}>{ext(file.name).slice(0, 4)}</div><div className="file-meta"><b>{file.name}</b><small>{fmtSize(file.size)} <span>·</span> {ext(file.name)}</small></div><div className="file-output-name"><Input aria-label={`${file.name} 的输出文件名`} value={file.outputName ?? ''} onChange={event => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, outputName: event.target.value } : item))} placeholder="输出文件名" addonAfter={`.${isMediaTrim ? ext(file.name).toLowerCase() : outputFormat.toLowerCase()}`} size="small" disabled={file.status !== 'ready'}/></div><div className={`file-status ${file.status}`}>{file.status === 'ready' ? '就绪' : file.status === 'queued' ? '排队中' : file.status === 'running' ? '处理中' : file.status === 'done' ? '已完成' : <button onClick={() => { setErrorDetail(file.detail || '未知错误'); setErrorModal(true) }}>查看错误</button>}</div><button className="remove-file" onClick={() => setFiles(current => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></div>{isMediaTrim && <div className="trim-segments"><div className="trim-segments-title">保留片段 <small>按时间先后拼接 · 单位：秒</small><small className="trim-duration-hint">{file.durationLoading ? "正在读取文件时长…" : file.duration !== undefined ? `文件时长 ${file.duration.toFixed(3)} 秒` : file.durationError ? "无法读取文件时长" : ""}</small></div>{(file.segments || []).map((segment, segmentIndex) => { const segmentError = trimSegmentError(file, segmentIndex); return <div className={`trim-segment-row${segmentError ? " has-error" : ""}`} key={segmentIndex}><InputNumber aria-label="片段开始秒数" min={0} max={file.duration} status={segmentError ? "error" : undefined} step={0.1} precision={3} placeholder="开始" addonAfter="秒" value={segment.start} onChange={value => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).map((part, partIndex) => partIndex === segmentIndex ? { ...part, start: value } : part) } : item))}/><span>至</span><InputNumber aria-label="片段结束秒数" min={0} max={file.duration} status={segmentError ? "error" : undefined} step={0.1} precision={3} placeholder="结束" addonAfter="秒" value={segment.end} onChange={value => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).map((part, partIndex) => partIndex === segmentIndex ? { ...part, end: value } : part) } : item))}/><Button size="small" className="trim-visual-button" onClick={() => setVisualTrim({ fileIndex: index, segmentIndex })}>可视化选择</Button>{segmentIndex === (file.segments || []).length - 1 ? <Tooltip title="预览裁剪后的效果"><Button type="text" aria-label="预览裁剪后的效果" className="trim-segment-preview-icon" icon={<PlayCircleOutlined/>} onClick={() => void openTrimResultPreview(file, index)}/></Tooltip> : <span className="trim-segment-preview-placeholder" aria-hidden="true"/>}{(file.segments || []).length > 1 && <Tooltip title="删除片段"><button className="trim-segment-remove" aria-label="删除片段" onClick={() => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).filter((_, partIndex) => partIndex !== segmentIndex) } : item))}>×</button></Tooltip>}{segmentError && <small className="trim-segment-error">{segmentError}</small>}</div> })}<Tooltip title="添加保留片段"><button className="trim-segment-add" aria-label="添加保留片段" onClick={() => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: [...(item.segments || []), { start: null, end: null }] } : item))}><PlusCircleOutlined/></button></Tooltip></div>}</div>)}</div> : <div className="empty-queue">文件将显示在这里 <span>⌄</span></div>}
             <div className="options-row">
               {!isMediaTrim && <div className="format-choice"><label>输出格式</label><Select value={outputFormat} onChange={setOutputFormat} options={formatChoices.map(value => ({ value, label: value }))} size="large"/></div>}
               {category === '图片' && tool.title === '图片缩放' ? <div className="quality-control resize-control">
@@ -545,6 +725,18 @@ function App() {
         <div className="trim-preview-range-label"><span>选择保留范围</span><InputNumber aria-label="保留片段开始时间" min={0} max={previewDuration} step={1} precision={3} addonAfter="秒" value={Number(previewRange[0].toFixed(3))} onChange={value => { if (value !== null) updatePreviewRange(0, Number(value)) }}/><span>至</span><InputNumber aria-label="保留片段结束时间" min={0} max={previewDuration} step={1} precision={3} addonAfter="秒" value={Number(previewRange[1].toFixed(3))} onChange={value => { if (value !== null) updatePreviewRange(1, Number(value)) }}/><div className="trim-clip-preview"><Tooltip title="试听片段"><Button type="text" aria-label="试听片段" className="trim-clip-play" icon={clipPreviewActive ? <PauseCircleOutlined/> : <PlayCircleOutlined/>} onClick={() => void toggleClipPreview()}/></Tooltip><span ref={clipPreviewElapsedRef}>0.000 秒</span><div ref={clipPreviewTrackRef} className="trim-clip-track"><span ref={clipPreviewFillRef} className="trim-clip-fill"/><span ref={clipPreviewThumbRef} className="trim-clip-thumb"/><input aria-label="试听片段进度" type="range" min={0} max={Math.max(0.001, previewRange[1] - previewRange[0])} step={0.001} defaultValue={0} onChange={event => { const media = previewMediaRef.current; const offset = Number(event.target.value); const duration = Math.max(0.001, previewRange[1] - previewRange[0]); const ratio = Math.min(1, offset / duration); if (clipPreviewFillRef.current) clipPreviewFillRef.current.style.transform = `scaleX(${ratio})`; if (clipPreviewThumbRef.current && clipPreviewTrackRef.current) clipPreviewThumbRef.current.style.transform = `translateX(${clipPreviewTrackRef.current.clientWidth * ratio}px)`; if (media) { media.currentTime = previewRange[0] + offset; if (clipPreviewElapsedRef.current) clipPreviewElapsedRef.current.textContent = `${offset.toFixed(3)} 秒` } }}/></div><span>{Math.max(0, previewRange[1] - previewRange[0]).toFixed(3)} 秒</span></div></div>
         <div className="trim-range-controls"><label>开始<input aria-label="可视化片段开始" type="range" min={0} max={previewDuration || 1} step={0.001} value={previewRange[0]} onChange={event => updatePreviewRange(0, Number(event.target.value))}/></label><label>结束<input aria-label="可视化片段结束" type="range" min={0} max={previewDuration || 1} step={0.001} value={previewRange[1]} onChange={event => updatePreviewRange(1, Number(event.target.value))}/></label></div>
         <p className="trim-preview-hint">拖动开始和结束滑块选择片段；也可以在播放器中试听或预览，再确认回填到当前行。</p>
+      </div>}
+    </Modal>
+    <Modal title={isVideoTrim ? '预览裁剪后的视频' : '预览裁剪后的音频'} rootClassName="trim-preview-modal" centered open={trimResultPreviewIndex !== null} onCancel={closeTrimResultPreview} footer={<Button onClick={closeTrimResultPreview}>关闭</Button>} width={760}>
+      {trimResultPreviewLoading && <div className="trim-preview-message">正在准备片段预览…</div>}
+      {trimResultPreviewError && <div className="trim-preview-message error">{trimResultPreviewError}</div>}
+      {!trimResultPreviewLoading && trimResultPreviewUrl && <div className="trim-result-preview">
+        <div className="trim-preview-file">{trimResultPreviewIndex === null ? '' : files[trimResultPreviewIndex]?.name}<span>拼接预览 · {trimResultPreviewDuration.toFixed(3)} 秒</span></div>
+        {isVideoTrim
+          ? <video className="trim-result-video" ref={element => { trimResultMediaRef.current = element }} src={trimResultPreviewUrl} preload="metadata" onLoadedMetadata={event => { const media = event.currentTarget; media.currentTime = Number(trimResultSegmentsRef.current[0]?.start || 0); void media.play().then(() => setTrimResultPreviewPlaying(true)).catch(error => message.error((error as Error).message || '视频预览播放失败')) }} onPlay={() => { setTrimResultPreviewPlaying(true); animateTrimResultProgress() }} onPause={() => { setTrimResultPreviewPlaying(false); if (trimResultFrameRef.current !== null) cancelAnimationFrame(trimResultFrameRef.current); trimResultFrameRef.current = null }} onTimeUpdate={event => handleTrimResultTimeUpdate(event.currentTarget)} onEnded={event => handleTrimResultTimeUpdate(event.currentTarget)} />
+          : <audio ref={element => { trimResultMediaRef.current = element }} src={trimResultPreviewUrl} preload="metadata" onLoadedMetadata={event => { const media = event.currentTarget; media.currentTime = Number(trimResultSegmentsRef.current[0]?.start || 0); void media.play().then(() => setTrimResultPreviewPlaying(true)).catch(error => message.error((error as Error).message || '音频预览播放失败')) }} onPlay={() => { setTrimResultPreviewPlaying(true); animateTrimResultProgress() }} onPause={() => { setTrimResultPreviewPlaying(false); if (trimResultFrameRef.current !== null) cancelAnimationFrame(trimResultFrameRef.current); trimResultFrameRef.current = null }} onTimeUpdate={event => handleTrimResultTimeUpdate(event.currentTarget)} onEnded={event => handleTrimResultTimeUpdate(event.currentTarget)} />}
+        <div className="trim-result-controls"><Tooltip title={trimResultPreviewPlaying ? '暂停预览' : '播放预览'}><Button type="text" aria-label={trimResultPreviewPlaying ? '暂停预览' : '播放预览'} className="trim-clip-play" icon={trimResultPreviewPlaying ? <PauseCircleOutlined/> : <PlayCircleOutlined/>} onClick={() => void toggleTrimResultPlayback()}/></Tooltip><span ref={trimResultElapsedRef}>0.000 秒</span><input ref={trimResultSeekRef} type="range" aria-label="裁剪预览进度" min={0} max={trimResultPreviewDuration || 1} step={0.001} defaultValue={0} onChange={event => seekTrimResultPreview(Number(event.target.value))}/><span>{trimResultPreviewDuration.toFixed(3)} 秒</span></div>
+        <p className="trim-preview-hint">按设置的保留片段顺序连续播放；进度条可拖动预览任意位置。</p>
       </div>}
     </Modal>
     <Modal title="转换错误详情" open={errorModal} onCancel={() => setErrorModal(false)} footer={<Button onClick={() => setErrorModal(false)}>关闭</Button>}><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '50vh', overflow: 'auto' }}>{errorDetail}</pre></Modal>

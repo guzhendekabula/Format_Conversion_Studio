@@ -6,6 +6,7 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const { spawn } = require('node:child_process')
 const { TaskQueue } = require('./services/task-queue.cjs')
+const { getFFmpegPath } = require('./services/ffmpeg-path.cjs')
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'media-preview', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }])
 
@@ -15,8 +16,9 @@ const previewFiles = new Map()
 function registerMediaPreviewHandler() {
 protocol.handle('media-preview', request => {
   const token = new URL(request.url).pathname.slice(1)
-  const filePath = previewFiles.get(token)
-  if (!filePath) return new Response('Not found', { status: 404 })
+  const preview = previewFiles.get(token)
+  if (!preview) return new Response('Not found', { status: 404 })
+  const filePath = preview.path
   return fs.stat(filePath).then(stat => {
     const range = request.headers.get('range')
     const mime = ({ mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac', ogg: 'audio/ogg', mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska', avi: 'video/x-msvideo', webm: 'video/webm' })[path.extname(filePath).slice(1).toLowerCase()] || 'application/octet-stream'
@@ -77,12 +79,100 @@ ipcMain.handle('media:register-preview', async (_event, filePath) => {
   const stat = await fs.stat(filePath)
   if (!stat.isFile()) throw new Error('预览目标不是文件')
   const token = crypto.randomUUID()
-  previewFiles.set(token, filePath)
+  previewFiles.set(token, { path: filePath, temporary: false })
   return `media-preview://source/${token}`
+})
+ipcMain.handle('media:create-trim-preview', async (_event, { filePath, segments, isVideo }) => {
+  if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) throw new Error('文件路径无效')
+  if (!Array.isArray(segments) || !segments.length || segments.length > 100) throw new Error('片段列表无效')
+  const normalized = segments.map(segment => ({ start: Number(segment.start), end: Number(segment.end) })).sort((a, b) => a.start - b.start)
+  if (normalized.some(segment => !Number.isFinite(segment.start) || !Number.isFinite(segment.end) || segment.start < 0 || segment.end <= segment.start)) throw new Error('片段时间无效')
+  if (normalized.some((segment, index) => index > 0 && segment.start < normalized[index - 1].end)) throw new Error('保留片段不能重叠')
+
+  const ffmpeg = getFFmpegPath()
+  const probe = await new Promise((resolve, reject) => {
+    const child = spawn(ffmpeg, ['-hide_banner', '-i', filePath], { windowsHide: true })
+    let stderr = ''
+    child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-100_000) })
+    child.on('error', reject)
+    child.on('close', () => {
+      const match = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr)
+      if (!match) return reject(new Error('无法读取媒体时长'))
+      resolve({ duration: Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]), hasAudio: /Audio:/.test(stderr) })
+    })
+  })
+  if (normalized.some(segment => segment.end > probe.duration + 0.01)) throw new Error(`片段结束时间超过文件时长（${probe.duration.toFixed(3)} 秒）`)
+
+  const extension = path.extname(filePath).slice(1).toLowerCase()
+  const duration = normalized.reduce((sum, segment) => sum + segment.end - segment.start, 0)
+  const filters = []
+  normalized.forEach((segment, index) => {
+    const start = segment.start.toFixed(3), end = segment.end.toFixed(3)
+    if (isVideo) filters.push(`[0:v:0]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[v${index}]`)
+    else filters.push(`[0:a:0]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[a${index}]`)
+    if (isVideo && probe.hasAudio) filters.push(`[0:a:0]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[a${index}]`)
+  })
+  const concatInputs = normalized.map((_, index) => isVideo && probe.hasAudio ? `[v${index}][a${index}]` : `[${isVideo ? 'v' : 'a'}${index}]`).join('')
+  filters.push(`${concatInputs}concat=n=${normalized.length}:v=${isVideo ? 1 : 0}:a=${isVideo && probe.hasAudio ? 1 : isVideo ? 0 : 1}${isVideo ? '[outv]' : '[outa]'}${isVideo && probe.hasAudio ? '[outa]' : ''}`)
+
+  const tempDir = path.join(app.getPath('temp'), 'format-conversion-studio-preview')
+  await fs.mkdir(tempDir, { recursive: true })
+  const outputPath = path.join(tempDir, `${crypto.randomUUID()}.${extension}`)
+  const args = ['-y', '-hide_banner', '-i', filePath, '-filter_complex', filters.join(';')]
+  if (isVideo) args.push('-map', '[outv]')
+  if (isVideo && probe.hasAudio) args.push('-map', '[outa]')
+  else if (!isVideo) args.push('-map', '[outa]')
+  if (!isVideo) {
+    if (extension === 'mp3') args.push('-c:a', 'libmp3lame', '-q:a', '2')
+    else if (extension === 'wav') args.push('-c:a', 'pcm_s16le')
+    else if (extension === 'flac') args.push('-c:a', 'flac')
+    else if (extension === 'ogg') args.push('-c:a', 'libvorbis', '-q:a', '5')
+    else if (extension === 'm4a' || extension === 'aac') args.push('-c:a', 'aac', '-b:a', '192k')
+    else throw new Error(`暂不支持预览 ${extension.toUpperCase()} 音频`)
+  } else if (extension === 'webm') args.push('-c:v', 'libvpx-vp9', '-deadline', 'realtime', '-cpu-used', '8', '-crf', '35', '-b:v', '0', ...(probe.hasAudio ? ['-c:a', 'libopus', '-b:a', '128k'] : []))
+  else if (extension === 'avi') args.push('-c:v', 'mpeg4', '-q:v', '5', ...(probe.hasAudio ? ['-c:a', 'libmp3lame', '-q:a', '4'] : []))
+  else if (['mp4', 'mov', 'mkv'].includes(extension)) args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '25', ...(probe.hasAudio ? ['-c:a', 'aac', '-b:a', '128k'] : []))
+  else throw new Error(`暂不支持预览 ${extension.toUpperCase()} 视频`)
+  if (['mp4', 'mov'].includes(extension)) args.push('-movflags', '+faststart')
+  args.push(outputPath)
+  await new Promise((resolve, reject) => {
+    const child = spawn(ffmpeg, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-100_000) })
+    child.on('error', reject)
+    child.on('close', code => code === 0 ? resolve() : reject(new Error(stderr.trim() || `预览生成失败，进程退出代码 ${code}`)))
+  }).catch(async error => { await fs.rm(outputPath, { force: true }); throw error })
+  const token = crypto.randomUUID()
+  previewFiles.set(token, { path: outputPath, temporary: true })
+  return { url: `media-preview://source/${token}`, duration }
+})
+ipcMain.handle('media:release-preview', async (_event, previewUrl) => {
+  let token
+  try { token = new URL(String(previewUrl)).pathname.slice(1) } catch { return false }
+  const preview = previewFiles.get(token)
+  if (!preview) return false
+  previewFiles.delete(token)
+  if (preview.temporary) await fs.rm(preview.path, { force: true })
+  return true
+})
+ipcMain.handle('media:duration', async (_event, filePath) => {
+  if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) throw new Error('文件路径无效')
+  const ffmpeg = getFFmpegPath()
+  return new Promise((resolve, reject) => {
+    const child = spawn(ffmpeg, ['-hide_banner', '-i', filePath], { windowsHide: true })
+    let stderr = ''
+    child.stderr.on('data', chunk => { stderr += chunk.toString() })
+    child.on('error', reject)
+    child.on('close', () => {
+      const match = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr)
+      if (!match) return reject(new Error('无法读取媒体时长'))
+      resolve(Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]))
+    })
+  })
 })
 ipcMain.handle('media:analyze', async (_event, filePath) => {
   if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) throw new Error('文件路径无效')
-  const ffmpeg = require('ffmpeg-static')
+  const ffmpeg = getFFmpegPath()
   const probe = await new Promise((resolve, reject) => {
     const child = spawn(ffmpeg, ['-hide_banner', '-i', filePath], { windowsHide: true })
     let stderr = ''
