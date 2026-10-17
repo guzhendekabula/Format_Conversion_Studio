@@ -5,7 +5,7 @@ const { randomUUID } = require('node:crypto')
 const { runEngine } = require('./engine-runner.cjs')
 
 const ALLOWED = new Set([
-  'media.extract-audio', 'media.audio', 'media.video', 'media.gif-to-video', 'media.video-to-gif',
+  'media.extract-audio', 'media.audio', 'media.audio-trim', 'media.video', 'media.video-trim', 'media.gif-to-video', 'media.video-to-gif',
   'image.convert', 'image.compress', 'image.resize', 'image.ico',
   'pdf.pdf-to-images', 'pdf.images-to-pdf',
   'excel.xlsx-to-csv', 'excel.csv-to-xlsx', 'excel.xlsx-to-json', 'excel.json-to-xlsx',
@@ -59,10 +59,16 @@ class TaskQueue {
 
   enqueue(input) {
     if (!input || !ALLOWED.has(input.operation)) throw new Error('未知转换任务')
-    const files = Array.isArray(input.files) ? input.files : []
+    const files = Array.isArray(input.files) ? input.files.map(file => ({ ...file, path: typeof file.path === 'string' ? path.normalize(file.path) : file.path })) : []
     if (!files.length || files.some(file => !file.path)) throw new Error('任务文件路径无效')
+    const options = { ...(input.options || {}) }
+    for (const key of ['outputNamesByPath', 'trimSegmentsByPath', 'targetBytesByPath']) {
+      if (options[key] && typeof options[key] === 'object') {
+        options[key] = Object.fromEntries(Object.entries(options[key]).map(([filePath, value]) => [path.normalize(filePath), value]))
+      }
+    }
     const id = randomUUID()
-    const job = { id, operation: input.operation, files, options: input.options || {}, outputDir: input.outputDir || '', createdAt: new Date().toISOString() }
+    const job = { id, operation: input.operation, files, options, outputDir: input.outputDir || '', createdAt: new Date().toISOString() }
     this.pending.push(job)
     this.emit('jobs:queued', { id, position: this.pending.length + (this.running ? 1 : 0), operation: job.operation, fileCount: files.length })
     void this.process()

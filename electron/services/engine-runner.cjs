@@ -85,6 +85,87 @@ async function getDuration(filePath) {
   }
 }
 
+async function inspectMedia(filePath) {
+  let details = ''
+  try { await runProcess(ffmpegPath(), ['-hide_banner', '-i', filePath], null, null) }
+  catch (error) { details = error.message || '' }
+  const durationMs = parseDuration(details)
+  if (!durationMs) throw new Error('无法读取媒体时长，请确认文件可正常播放')
+  return { durationMs, hasAudio: /Stream #\d+:\d+(?:\[[^\]]+\])?(?:\([^)]*\))?: Audio:/i.test(details) || /Stream #\d+:\d+.*Audio:/i.test(details) }
+}
+
+function trimSegmentsFor(input, options, durationMs) {
+  const raw = options.trimSegmentsByPath?.[input]
+  if (!Array.isArray(raw) || !raw.length) throw new Error('请至少添加一个有效的保留片段')
+  const segments = raw.map(segment => ({ start: Number(segment.start), end: Number(segment.end) }))
+  if (segments.some(segment => !Number.isFinite(segment.start) || !Number.isFinite(segment.end) || segment.start < 0 || segment.end <= segment.start)) {
+    throw new Error('片段时间无效：开始时间须大于等于 0，结束时间须晚于开始时间')
+  }
+  segments.sort((a, b) => a.start - b.start)
+  for (let index = 1; index < segments.length; index += 1) {
+    if (segments[index].start < segments[index - 1].end) throw new Error('保留片段不能重叠')
+  }
+  const duration = durationMs / 1000
+  if (segments.some(segment => segment.end > duration + 0.01)) throw new Error(`片段结束时间超过文件时长（${duration.toFixed(3)} 秒）`)
+  return segments
+}
+
+function seconds(value) { return Number(value).toFixed(3) }
+
+function audioCodecArgs(extension) {
+  if (extension === 'mp3') return ['-c:a', 'libmp3lame', '-q:a', '2']
+  if (extension === 'wav') return ['-c:a', 'pcm_s16le']
+  if (extension === 'flac') return ['-c:a', 'flac']
+  if (extension === 'ogg') return ['-c:a', 'libvorbis', '-q:a', '5']
+  if (extension === 'm4a' || extension === 'aac') return ['-c:a', 'aac', '-b:a', '192k']
+  throw new Error(`暂不支持裁剪 ${extension.toUpperCase()} 音频`)
+}
+
+function videoCodecArgs(extension, hasAudio) {
+  if (extension === 'webm') return ['-c:v', 'libvpx-vp9', '-crf', '32', '-b:v', '0', ...(hasAudio ? ['-c:a', 'libopus', '-b:a', '128k'] : [])]
+  if (extension === 'avi') return ['-c:v', 'mpeg4', '-q:v', '4', ...(hasAudio ? ['-c:a', 'libmp3lame', '-q:a', '3'] : [])]
+  if (['mp4', 'mov', 'mkv'].includes(extension)) return ['-c:v', 'libx264', '-preset', 'medium', '-crf', '20', ...(hasAudio ? ['-c:a', 'aac', '-b:a', '192k'] : [])]
+  throw new Error(`暂不支持裁剪 ${extension.toUpperCase()} 视频`)
+}
+
+async function runMediaTrim(request, progress, isVideo) {
+  const input = request.path
+  const options = request.options || {}
+  const extension = path.extname(input).slice(1).toLowerCase()
+  const dir = request.outputDir || path.dirname(input)
+  await fs.mkdir(dir, { recursive: true })
+  const requestedName = String(options.outputNamesByPath?.[input] || options.outputName || '').trim()
+  const outputOptions = requestedName ? options : { ...options, outputName: `${path.basename(input, path.extname(input))}_trim` }
+  const output = await uniqueOutput(dir, outputStem(input, outputOptions, extension), `.${extension}`)
+  try {
+    const media = await inspectMedia(input)
+    const segments = trimSegmentsFor(input, options, media.durationMs)
+    const filteredDurationMs = segments.reduce((sum, segment) => sum + (segment.end - segment.start) * 1000, 0)
+    const filters = []
+    segments.forEach((segment, index) => {
+      const start = seconds(segment.start), end = seconds(segment.end)
+      if (isVideo) filters.push(`[0:v:0]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[v${index}]`)
+      else filters.push(`[0:a:0]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[a${index}]`)
+      if (isVideo && media.hasAudio) filters.push(`[0:a:0]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[a${index}]`)
+    })
+    let concatInputs
+    if (isVideo && media.hasAudio) concatInputs = segments.map((_, index) => `[v${index}][a${index}]`).join('')
+    else concatInputs = segments.map((_, index) => `[${isVideo ? 'v' : 'a'}${index}]`).join('')
+    filters.push(`${concatInputs}concat=n=${segments.length}:v=${isVideo ? 1 : 0}:a=${isVideo && media.hasAudio ? 1 : isVideo ? 0 : 1}${isVideo ? '[outv]' : '[outa]'}${isVideo && media.hasAudio ? '[outa]' : ''}`)
+    const args = ['-y', '-hide_banner', '-i', input, '-filter_complex', filters.join(';')]
+    if (isVideo) args.push('-map', '[outv]')
+    if (isVideo && media.hasAudio) args.push('-map', '[outa]')
+    else if (!isVideo) args.push('-map', '[outa]')
+    args.push(...(isVideo ? videoCodecArgs(extension, media.hasAudio) : audioCodecArgs(extension)), '-progress', 'pipe:1', '-nostats', output)
+    await runProcess(ffmpegPath(), args, null, progress, filteredDurationMs)
+  } catch (error) {
+    await fs.rm(output, { force: true })
+    throw error
+  }
+  progress?.(100)
+  return { outputs: [output] }
+}
+
 function parseDuration(text) {
   const match = text.match(/Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/)
   return match ? (Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3])) * 1000 : 0
@@ -95,7 +176,7 @@ async function runFfmpeg(request, progress) {
   const operation = request.operation
   const options = request.options || {}
   const target = String(options.format || 'mp3').toLowerCase()
-  const ext = target === 'jpeg' ? 'jpg' : target
+  const ext = operation === 'media.audio-trim' || operation === 'media.video-trim' ? path.extname(input).slice(1).toLowerCase() : target === 'jpeg' ? 'jpg' : target
   const dir = request.outputDir || path.dirname(input)
   await fs.mkdir(dir, { recursive: true })
   const output = await uniqueOutput(dir, outputStem(input, options, ext), `.${ext}`)
@@ -123,13 +204,18 @@ async function runFfmpeg(request, progress) {
 }
 
 async function runPython(request, progress) {
+  const requestPathFields = [request.path, ...(Array.isArray(request.paths) ? request.paths : [])].filter(Boolean)
+  for (const filePath of requestPathFields) {
+    try { await fs.access(filePath) }
+    catch { throw new Error(`找不到源文件，路径为：${filePath}。请确认文件仍在原位置，或重新添加文件。`) }
+  }
   const packaged = app.isPackaged
   const worker = workerPath()
   const python = packaged ? worker : await pythonPath()
   const args = packaged ? [] : [worker]
   const payload = { ...request, popplerPath: popplerPath() }
   return new Promise((resolve, reject) => {
-    const child = spawn(python, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, POPPLER_DATADIR: path.join(popplerPath(), 'share-poppler') } })
+    const child = spawn(python, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', POPPLER_DATADIR: path.join(popplerPath(), 'share-poppler') } })
     let remainder = '', stderr = '', result = null, workerError = null
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8')
     child.stdout.on('data', chunk => {
@@ -155,6 +241,8 @@ async function runPython(request, progress) {
 }
 
 async function runEngine(request, progress) {
+  if (request.operation === 'media.audio-trim') return runMediaTrim(request, progress, false)
+  if (request.operation === 'media.video-trim') return runMediaTrim(request, progress, true)
   return request.operation.startsWith('media.') ? runFfmpeg(request, progress) : runPython(request, progress)
 }
 

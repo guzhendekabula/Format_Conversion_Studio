@@ -272,7 +272,11 @@ def run(request):
 
 if __name__ == "__main__":
     try:
-        request = json.loads(sys.stdin.readline())
+        # Electron writes the JSON-lines protocol as UTF-8. Decode the bytes
+        # explicitly instead of relying on Windows' active code page, so
+        # Chinese and other Unicode file paths survive intact.
+        request_line = sys.stdin.buffer.readline().decode("utf-8")
+        request = json.loads(request_line)
         emit("result", **run(request))
     except Exception as error:
         emit("error", message=str(error), detail=traceback.format_exc())

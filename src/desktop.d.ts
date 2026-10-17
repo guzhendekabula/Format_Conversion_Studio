@@ -7,6 +7,8 @@ declare global {
       selectDirectory: () => Promise<string | null>
       selectFolderFiles: (extensions: string) => Promise<{ path: string; name: string; size: number }[]>
       readFile: (path: string) => Promise<number[]>
+      registerMediaPreview: (path: string) => Promise<string>
+      analyzeMedia: (path: string) => Promise<{ duration: number; hasAudio: boolean; peaks: number[] }>
       saveFile: (payload: { name: string; data: number[]; directory?: string; sourcePath?: string }) => Promise<boolean>
       getPathForFile: (file: File) => string
       hashText: (algorithm: string, text: string) => Promise<string>

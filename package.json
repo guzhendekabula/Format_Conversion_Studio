@@ -1,8 +1,10 @@
 {
   "name": "conversion_tool",
   "private": true,
-  "version": "1.1.0",
-  "engines": { "node": ">=22.12.0" },
+  "version": "1.2.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -48,21 +50,45 @@
   "build": {
     "appId": "studio.formatconversion.app",
     "productName": "Format Conversion Studio",
-    "directories": { "buildResources": "build" },
-    "asarUnpack": ["node_modules/ffmpeg-static/**"],
-    "files": ["dist/**/*", "electron/**/*", "node_modules/ffmpeg-static/**/*", "package.json"],
-    "extraResources": [
-      { "from": "conversion-engines/python/dist", "to": "engines/python" },
-      { "from": "conversion-engines/poppler/dist", "to": "engines/poppler" }
+    "directories": {
+      "buildResources": "build"
+    },
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**"
     ],
-    "mac": { "target": ["dmg", "zip", "dir"], "icon": "build/icon.svg" },
-    "win": {
-      "target": ["nsis"],
-      "icon": "build/icon.svg",
-      "nsis": {
-        "oneClick": false,
-        "allowToChangeInstallationDirectory": true
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "node_modules/ffmpeg-static/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "conversion-engines/python/dist",
+        "to": "engines/python"
+      },
+      {
+        "from": "conversion-engines/poppler/dist",
+        "to": "engines/poppler"
       }
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip",
+        "dir"
+      ],
+      "icon": "build/icon.svg"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.svg"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     }
   }
 }

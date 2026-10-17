@@ -3,14 +3,15 @@ import { Button, Dropdown, Input, InputNumber, message, Modal, Pagination, Selec
 import type { MenuProps } from 'antd'
 import { XMLBuilder, XMLParser, XMLValidator } from 'fast-xml-parser'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
-import { DeleteOutlined, FileSearchOutlined, FolderOpenOutlined, RollbackOutlined } from '@ant-design/icons'
+import { DeleteOutlined, FileSearchOutlined, FolderOpenOutlined, PauseCircleOutlined, PlayCircleOutlined, PlusCircleOutlined, RollbackOutlined } from '@ant-design/icons'
 import './App.css'
 
 type Category = '音视频' | '图片' | 'PDF' | 'Excel' | 'Word' | '开发工具'
-type LocalFile = { name: string; outputName?: string; size: number; type: string; file?: File; path?: string; status: 'ready' | 'queued' | 'running' | 'done' | 'error'; detail?: string }
+type ClipSegment = { start: number | null; end: number | null }
+type LocalFile = { name: string; outputName?: string; segments?: ClipSegment[]; size: number; type: string; file?: File; path?: string; status: 'ready' | 'queued' | 'running' | 'done' | 'error'; detail?: string }
 type Tool = { title: string; desc: string; from: string; to: string }
 const tools: Record<Category, Tool[]> = {
-  音视频: [{ title: '视频提取音频', desc: '从视频文件中提取音轨', from: 'MP4 / MOV / MKV / AVI', to: 'MP3' }, { title: '音频格式转换', desc: '转换常见音频格式与音质', from: 'MP3 / WAV / M4A / AAC / FLAC / OGG', to: 'WAV / MP3' }, { title: '视频格式转换', desc: '在常用视频容器之间转换', from: 'MP4 / MOV / MKV / AVI / WEBM', to: 'MP4 / MOV / MKV / AVI / WEBM' }, { title: 'GIF 转换', desc: '视频与动图互转，设置帧率和尺寸', from: 'GIF / MP4', to: 'MP4 / GIF' }],
+  音视频: [{ title: '视频提取音频', desc: '从视频文件中提取音轨', from: 'MP4 / MOV / MKV / AVI', to: 'MP3' }, { title: '音频格式转换', desc: '转换常见音频格式与音质', from: 'MP3 / WAV / M4A / AAC / FLAC / OGG', to: 'WAV / MP3' }, { title: '音频裁剪', desc: '设置并拼接要保留的音频片段', from: 'MP3 / WAV / M4A / AAC / FLAC / OGG', to: '保持原格式' }, { title: '视频格式转换', desc: '在常用视频容器之间转换', from: 'MP4 / MOV / MKV / AVI / WEBM', to: 'MP4 / MOV / MKV / AVI / WEBM' }, { title: '视频裁剪', desc: '设置并拼接要保留的视频片段', from: 'MP4 / MOV / MKV / AVI / WEBM', to: '保持原格式' }, { title: 'GIF 转换', desc: '视频与动图互转，设置帧率和尺寸', from: 'GIF / MP4', to: 'MP4 / GIF' }],
   图片: [{ title: '图片格式转换', desc: '转换图片格式，保持清晰度', from: 'PNG / JPG / WEBP / BMP / TIFF', to: 'JPG / PNG / WEBP' }, { title: '图片压缩', desc: '调整图片质量，批量减小体积', from: '图片文件', to: 'JPG / WEBP / PNG' }, { title: '图片缩放', desc: '按宽度、高度或比例调整尺寸', from: '图片文件', to: '调整尺寸' }, { title: 'ICO 生成', desc: '为应用或网站制作图标文件', from: 'PNG / JPG', to: 'ICO' }],
   PDF: [{ title: 'PDF 转图片', desc: '将 PDF 每一页导出为图片', from: 'PDF', to: 'PNG / JPG' }, { title: '图片转 PDF', desc: '将一张或多张图片保存为 PDF', from: 'PNG / JPG', to: 'PDF' }, { title: '合并为 PDF', desc: '拖动排序，将多张图片合并成文档', from: '多张图片', to: 'PDF' }],
   Excel: [{ title: 'CSV 转换', desc: '在 Excel 与 CSV 之间转换', from: 'XLSX / CSV', to: 'CSV / XLSX' }, { title: 'JSON 转换', desc: '在 Excel 与 JSON 之间转换', from: 'XLSX / JSON', to: 'JSON / XLSX' }],
@@ -71,16 +72,160 @@ function App() {
   const [errorDetail, setErrorDetail] = useState('')
   const [errorModal, setErrorModal] = useState(false)
   const [aboutModal, setAboutModal] = useState(false)
+  const [visualTrim, setVisualTrim] = useState<{ fileIndex: number; segmentIndex: number } | null>(null)
+  const [previewUrl, setPreviewUrl] = useState('')
+  const [previewDuration, setPreviewDuration] = useState(0)
+  const [previewPeaks, setPreviewPeaks] = useState<number[]>([])
+  const [previewHasAudio, setPreviewHasAudio] = useState(false)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState('')
+  const [previewRange, setPreviewRange] = useState<[number, number]>([0, 1])
+  const [previewTime, setPreviewTime] = useState(0)
+  const previewMediaRef = useRef<HTMLMediaElement>(null)
+  const previewPlayheadRef = useRef<HTMLSpanElement>(null)
+  const previewWaveformRef = useRef<HTMLDivElement>(null)
+  const previewSeekingRef = useRef(false)
+  const previewSeekRef = useRef<HTMLInputElement>(null)
+  const previewElapsedRef = useRef<HTMLSpanElement>(null)
+  const clipPreviewTrackRef = useRef<HTMLDivElement>(null)
+  const clipPreviewFillRef = useRef<HTMLSpanElement>(null)
+  const clipPreviewThumbRef = useRef<HTMLSpanElement>(null)
+  const clipPreviewElapsedRef = useRef<HTMLSpanElement>(null)
+  const clipPreviewingRef = useRef(false)
+  const [clipPreviewActive, setClipPreviewActive] = useState(false)
+  const previewPlayheadFrameRef = useRef<number | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const devImageRef = useRef<HTMLInputElement>(null)
   const dragIndex = useRef<number | null>(null)
   const isDev = category === '开发工具'
+  const isAudioTrim = category === '音视频' && tool.title === '音频裁剪'
+  const isVideoTrim = category === '音视频' && tool.title === '视频裁剪'
+  const isMediaTrim = isAudioTrim || isVideoTrim
+
+  useEffect(() => {
+    if (!visualTrim) return
+    const file = files[visualTrim.fileIndex]
+    const sourcePath = file?.path || (file?.file ? window.desktop?.getPathForFile(file.file) : '')
+    if (!sourcePath || !window.desktop?.registerMediaPreview || !window.desktop?.analyzeMedia) {
+      setPreviewError('可视化预览需要在桌面应用中打开本地文件。')
+      return
+    }
+    let cancelled = false
+    setPreviewLoading(true); setPreviewError(''); setPreviewUrl(''); setPreviewPeaks([])
+    Promise.all([window.desktop.registerMediaPreview(sourcePath), window.desktop.analyzeMedia(sourcePath)]).then(([url, info]) => {
+      if (cancelled) return
+      setPreviewUrl(url); setPreviewDuration(info.duration); setPreviewPeaks(info.peaks); setPreviewHasAudio(info.hasAudio)
+      const segment = file.segments?.[visualTrim.segmentIndex]
+      setPreviewRange([Math.min(segment?.start ?? 0, info.duration), Math.min(segment?.end ?? Math.min(1, info.duration), info.duration)])
+      setPreviewTime(0); setPreviewLoading(false)
+    }).catch(error => { if (!cancelled) { setPreviewError((error as Error).message || '生成媒体预览失败'); setPreviewLoading(false) } })
+    return () => { cancelled = true; previewMediaRef.current?.pause(); stopPreviewPlayhead() }
+  }, [visualTrim])
+
+  const updatePreviewRange = (handle: 0 | 1, value: number) => {
+    setPreviewRange(current => handle === 0
+      ? [Math.min(value, current[1]), current[1]]
+      : [current[0], Math.max(value, current[0])])
+  }
+
+  const stopPreviewPlayhead = () => {
+    if (previewPlayheadFrameRef.current !== null) cancelAnimationFrame(previewPlayheadFrameRef.current)
+    previewPlayheadFrameRef.current = null
+  }
+
+  const syncPreviewPlayback = (media: HTMLMediaElement) => {
+    const time = media.currentTime
+    const duration = previewDuration || 1
+    const percent = Math.min(1, Math.max(0, time / duration))
+    const waveform = previewPlayheadRef.current?.parentElement
+    if (previewPlayheadRef.current && waveform) {
+      const x = Math.max(0, waveform.clientWidth - 20) * percent
+      previewPlayheadRef.current.style.transform = `translate3d(${x}px,0,0)`
+    }
+    if (previewSeekRef.current) previewSeekRef.current.value = String(Math.min(time, previewDuration || time))
+    if (previewElapsedRef.current) previewElapsedRef.current.textContent = `${time.toFixed(3)} 秒`
+    if (clipPreviewingRef.current) {
+      const clipTime = Math.max(0, Math.min(time - previewRange[0], previewRange[1] - previewRange[0]))
+      const clipDuration = Math.max(0.001, previewRange[1] - previewRange[0])
+      const clipPercent = Math.min(1, clipTime / clipDuration)
+      if (clipPreviewFillRef.current) clipPreviewFillRef.current.style.transform = `scaleX(${clipPercent})`
+      if (clipPreviewThumbRef.current && clipPreviewTrackRef.current) clipPreviewThumbRef.current.style.transform = `translateX(${clipPreviewTrackRef.current.clientWidth * clipPercent}px)`
+      if (clipPreviewElapsedRef.current) clipPreviewElapsedRef.current.textContent = `${clipTime.toFixed(3)} 秒`
+    }
+  }
+
+  const seekPreviewFromPointer = (clientX: number) => {
+    const media = previewMediaRef.current
+    const waveform = previewWaveformRef.current
+    if (!media || !waveform || !previewDuration) return
+    const bounds = waveform.getBoundingClientRect()
+    const fraction = Math.min(1, Math.max(0, (clientX - bounds.left - 10) / Math.max(1, bounds.width - 20)))
+    media.currentTime = fraction * previewDuration
+    syncPreviewPlayback(media)
+  }
+
+  const finishPreviewSeek = () => {
+    previewSeekingRef.current = false
+    if (previewMediaRef.current) setPreviewTime(previewMediaRef.current.currentTime)
+  }
+
+  const closeVisualTrim = () => {
+    previewMediaRef.current?.pause()
+    stopPreviewPlayhead()
+    setVisualTrim(null)
+  }
+
+  const toggleClipPreview = async () => {
+    const media = previewMediaRef.current
+    if (!media || previewRange[1] <= previewRange[0]) return
+    if (clipPreviewActive && !media.paused) {
+      clipPreviewingRef.current = false
+      setClipPreviewActive(false)
+      media.pause()
+      return
+    }
+    try {
+      clipPreviewingRef.current = true
+      media.currentTime = previewRange[0]
+      syncPreviewPlayback(media)
+      await media.play()
+      setClipPreviewActive(true)
+    } catch (error) { clipPreviewingRef.current = false; setClipPreviewActive(false); message.error((error as Error).message || '片段试听失败') }
+  }
+
+  const animatePreviewPlayhead = () => {
+    stopPreviewPlayhead()
+    const update = () => {
+      const media = previewMediaRef.current
+      if (!media || media.paused || media.ended) {
+        previewPlayheadFrameRef.current = null
+        return
+      }
+      syncPreviewPlayback(media)
+      previewPlayheadFrameRef.current = requestAnimationFrame(update)
+    }
+    previewPlayheadFrameRef.current = requestAnimationFrame(update)
+  }
+
+  const confirmPreviewRange = () => {
+    if (!visualTrim) return
+    const { fileIndex, segmentIndex } = visualTrim
+    setFiles(current => current.map((file, index) => index === fileIndex ? {
+      ...file,
+      segments: (file.segments || []).map((segment, partIndex) => partIndex === segmentIndex
+        ? { start: Number(previewRange[0].toFixed(3)), end: Number(previewRange[1].toFixed(3)) }
+        : segment),
+    } : file))
+    closeVisualTrim()
+  }
 
   const extensions = useMemo(() => {
     if (category === '图片') return tool.title === 'ICO 生成' ? '.png,.jpg,.jpeg' : '.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff'
     if (category === '音视频') {
       if (tool.title === '视频提取音频') return '.mp4,.mov,.mkv,.avi'
       if (tool.title === '音频格式转换') return '.mp3,.wav,.m4a,.aac,.flac,.ogg'
+      if (tool.title === '音频裁剪') return '.mp3,.wav,.m4a,.aac,.flac,.ogg'
+      if (tool.title === '视频裁剪') return '.mp4,.mov,.mkv,.avi,.webm'
       if (tool.title === 'GIF 转换') return '.gif,.mp4'
       return '.mp4,.mov,.mkv,.avi,.webm'
     }
@@ -93,6 +238,7 @@ function App() {
     if (category === '音视频') {
       if (tool.title === '视频提取音频') return ['MP3']
       if (tool.title === '音频格式转换') return ['MP3', 'WAV']
+      if (tool.title === '音频裁剪' || tool.title === '视频裁剪') return []
       if (tool.title === '视频格式转换') return ['MP4', 'MOV', 'MKV', 'AVI', 'WEBM']
       return ['MP4', 'GIF']
     }
@@ -147,7 +293,7 @@ function App() {
 
   const chooseTool = (nextCategory: Category, nextTool: Tool) => {
     setCategory(nextCategory); setTool(nextTool); setFiles([]); setResult(''); setInput(''); base64InputRef.current = null
-    const choices = nextCategory === '开发工具' ? [] : nextCategory === '图片' ? (nextTool.title === 'ICO 生成' ? ['ICO'] : nextTool.title === '图片压缩' ? ['JPG', 'WEBP', 'PNG'] : ['PNG', 'JPG', 'WEBP']) : nextCategory === '音视频' ? (nextTool.title === '视频提取音频' ? ['MP3'] : nextTool.title === '音频格式转换' ? ['MP3', 'WAV'] : nextTool.title === 'GIF 转换' ? ['MP4', 'GIF'] : ['MP4', 'MOV', 'MKV', 'AVI', 'WEBM']) : nextCategory === 'PDF' ? (nextTool.title === 'PDF 转图片' ? ['PNG', 'JPG'] : ['PDF']) : nextCategory === 'Excel' ? (nextTool.title === 'CSV 转换' ? ['CSV', 'XLSX'] : ['JSON', 'XLSX']) : nextTool.title === 'DOCX 转 TXT' ? ['TXT'] : ['MD']
+    const choices = nextCategory === '开发工具' ? [] : nextCategory === '图片' ? (nextTool.title === 'ICO 生成' ? ['ICO'] : nextTool.title === '图片压缩' ? ['JPG', 'WEBP', 'PNG'] : ['PNG', 'JPG', 'WEBP']) : nextCategory === '音视频' ? (nextTool.title === '音频裁剪' || nextTool.title === '视频裁剪' ? [] : nextTool.title === '视频提取音频' ? ['MP3'] : nextTool.title === '音频格式转换' ? ['MP3', 'WAV'] : nextTool.title === 'GIF 转换' ? ['MP4', 'GIF'] : ['MP4', 'MOV', 'MKV', 'AVI', 'WEBM']) : nextCategory === 'PDF' ? (nextTool.title === 'PDF 转图片' ? ['PNG', 'JPG'] : ['PDF']) : nextCategory === 'Excel' ? (nextTool.title === 'CSV 转换' ? ['CSV', 'XLSX'] : ['JSON', 'XLSX']) : nextTool.title === 'DOCX 转 TXT' ? ['TXT'] : ['MD']
     if (choices.length) setOutputFormat(choices[0])
   }
   const addFiles = async (list: FileList | File[]) => {
@@ -157,7 +303,7 @@ function App() {
     const mapped = accepted.map(file => {
       let path = filePath(file)
       if (!path && window.desktop?.getPathForFile) { try { path = window.desktop.getPathForFile(file) } catch { path = undefined } }
-      return { name: file.name, outputName: file.name.replace(/\.[^.]+$/, ''), size: file.size, type: file.type, file, path, status: 'ready' as const }
+      return { name: file.name, outputName: `${file.name.replace(/\.[^.]+$/, '')}${isMediaTrim ? '_trim' : ''}`, segments: isMediaTrim ? [{ start: 0, end: 1 }] : undefined, size: file.size, type: file.type, file, path, status: 'ready' as const }
     })
     setFiles(current => [...current, ...mapped])
     if (category === 'Excel' && accepted.length) {
@@ -168,13 +314,13 @@ function App() {
   const browse = async () => {
     if (window.desktop?.selectFiles) {
       const selected = await window.desktop.selectFiles(extensions)
-      if (selected.length) setFiles(current => [...current, ...selected.map(file => ({ ...file, outputName: file.name.replace(/\.[^.]+$/, ''), type: '', status: 'ready' as const }))])
+      if (selected.length) setFiles(current => [...current, ...selected.map(file => ({ ...file, outputName: `${file.name.replace(/\.[^.]+$/, '')}${isMediaTrim ? '_trim' : ''}`, segments: isMediaTrim ? [{ start: 0, end: 1 }] : undefined, type: '', status: 'ready' as const }))])
     } else fileRef.current?.click()
   }
   const browseFolder = async () => {
     if (!window.desktop?.selectFolderFiles) { message.info('文件夹导入需要在 Electron 桌面模式中使用'); return }
     const selected = await window.desktop.selectFolderFiles(extensions)
-    setFiles(current => [...current, ...selected.map(file => ({ ...file, outputName: file.name.replace(/\.[^.]+$/, ''), type: '', status: 'ready' as const }))])
+    setFiles(current => [...current, ...selected.map(file => ({ ...file, outputName: `${file.name.replace(/\.[^.]+$/, '')}${isMediaTrim ? '_trim' : ''}`, segments: isMediaTrim ? [{ start: 0, end: 1 }] : undefined, type: '', status: 'ready' as const }))])
     if (selected.length) message.success(`已添加 ${selected.length} 个文件`)
   }
   const outputFolder = async () => {
@@ -272,6 +418,8 @@ function App() {
       if (tool.title === '视频提取音频') return 'media.extract-audio'
       if (tool.title === '音频格式转换') return 'media.audio'
       if (tool.title === 'GIF 转换') return file.name.toLowerCase().endsWith('.gif') ? 'media.gif-to-video' : 'media.video-to-gif'
+      if (tool.title === '音频裁剪') return 'media.audio-trim'
+      if (tool.title === '视频裁剪') return 'media.video-trim'
       return 'media.video'
     }
     if (category === '图片') return tool.title === '图片缩放' ? 'image.resize' : tool.title === '图片压缩' ? 'image.compress' : tool.title === 'ICO 生成' ? 'image.ico' : 'image.convert'
@@ -291,6 +439,7 @@ function App() {
   const optionsForTask = (targetBytesByPath?: Record<string, number>) => ({
     format: outputFormat, quality, fps, width: gifWidth, duration: gifDuration || undefined,
     outputNamesByPath: Object.fromEntries(files.filter(file => file.path && file.outputName?.trim()).map(file => [file.path!, file.outputName!.trim()])),
+    ...(isMediaTrim ? { trimSegmentsByPath: Object.fromEntries(files.filter(file => file.path).map(file => [file.path!, (file.segments || []).map(segment => ({ start: segment.start, end: segment.end }))])) } : {}),
     dpi: tool.title === 'PDF 转图片' ? Math.round(72 + (quality / 100) * 228) : undefined,
     resize: { mode: resizeMode, percent: resizePercent, width: resizeWidth, height: resizeHeight },
     ...(targetBytesByPath ? { targetBytesByPath } : {}),
@@ -306,6 +455,19 @@ function App() {
       if (category === '音视频' && tool.title === 'GIF 转换') {
         const expected = files[0].name.toLowerCase().endsWith('.gif') ? 'MP4' : 'GIF'
         if (outputFormat !== expected) { message.warning(`该输入文件需要选择 ${expected} 输出格式`); return }
+      }
+      if (isMediaTrim) {
+        for (const file of files) {
+          const segments = file.segments || []
+          if (!segments.length) { message.warning(`请为「${file.name}」至少添加一个保留片段`); return }
+          if (segments.some(segment => segment.start === null || segment.end === null || !Number.isFinite(segment.start) || !Number.isFinite(segment.end) || segment.start < 0 || segment.end <= segment.start)) {
+            message.warning(`「${file.name}」的片段时间无效，请检查开始和结束秒数`); return
+          }
+          const sorted = [...segments].sort((a, b) => Number(a.start) - Number(b.start))
+          if (sorted.some((segment, index) => index > 0 && Number(segment.start) < Number(sorted[index - 1].end))) {
+            message.warning(`「${file.name}」的保留片段不能重叠`); return
+          }
+        }
       }
       if (category === 'PDF' && tool.title === '合并为 PDF' && files.length < 2) { message.warning('请至少选择两张图片'); return }
       if (category === '图片' && tool.title === '图片压缩' && files.some(file => {
@@ -336,7 +498,7 @@ function App() {
   const menuItems: MenuProps['items'] = [{ key: 'new', label: '新建任务' }, { key: 'history', label: '转换历史' }, { key: 'about', label: '关于 Format Studio' }]
   const runDev = (action: string) => <Button type="primary" onClick={() => void doDeveloperAction(action)}>{action}</Button>
   const qualityLabel = tool.title === '图片缩放' ? '缩放' : tool.title === 'PDF 转图片' ? '分辨率' : tool.title.includes('音频') || tool.title === '视频提取音频' ? '音质' : '质量'
-  const showQuality = category === '图片' && tool.title !== '图片缩放' || category === '音视频' && tool.title !== 'GIF 转换' || tool.title === 'PDF 转图片'
+  const showQuality = !isMediaTrim && (category === '图片' && tool.title !== '图片缩放' || category === '音视频' && tool.title !== 'GIF 转换' || tool.title === 'PDF 转图片')
 
   return <div className={`app-shell ${dark ? 'dark' : ''}`}>
     <aside className="sidebar">
@@ -353,9 +515,9 @@ function App() {
         <section className="workspace-card"><div className="workspace-head"><div><div className="task-title"><span className="task-dot" />{tool.title}</div><p>{tool.desc}</p></div><button className="more-btn">•••</button></div>
           {isDev ? <div className="dev-workspace"><div className="editor-head"><span>输入内容</span><span className="editor-hint">{tool.title === 'Base64 工具' && base64InputRef.current ? '大型内容已暂存，不会完整显示在输入框中' : '在此粘贴或输入内容'}</span></div><Input.TextArea value={input} onChange={event => { base64InputRef.current = null; setInput(event.target.value) }} onPaste={event => { if (tool.title !== 'Base64 工具') return; const pasted = event.clipboardData.getData('text'); if (pasted.length < 16000) return; event.preventDefault(); base64InputRef.current = pasted; setInput(`已暂存大型 Base64 内容（约 ${(pasted.length * 0.75 / 1024 / 1024).toFixed(1)} MB），可点击“Base64 → 图片”解码`) }} placeholder={tool.title === 'JSON 工具' ? '{\n  "name": "Format Studio",\n  "local": true\n}' : '在此粘贴或输入内容…'} autoSize={{ minRows: 7, maxRows: 12 }} className="code-input"/><input ref={devImageRef} hidden type="file" accept="image/*" onChange={event => { if (event.target.files?.[0]) void selectBase64Image(event.target.files[0]); event.target.value = '' }}/><div className="editor-actions">{tool.title === 'JSON 工具' ? <>{runDev('格式化')}{runDev('压缩')}{runDev('校验')}</> : tool.title === 'URL 工具' ? <>{runDev('Encode')}{runDev('Decode')}</> : tool.title === 'Base64 工具' ? <>{runDev('Encode')}{runDev('Decode')}<Button onClick={() => window.desktop?.selectFiles ? void selectBase64Image() : devImageRef.current?.click()}>选择图片 → Base64</Button><Button onClick={decodeBase64Image}>Base64 → 图片</Button></> : tool.title === 'Hash 工具' ? <>{runDev('MD5')}{runDev('SHA1')}{runDev('SHA256')}</> : tool.title === 'YAML 转换' ? <>{runDev('JSON → YAML')}{runDev('YAML → JSON')}</> : <>{runDev('XML → JSON')}{runDev('JSON → XML')}</>}<Button onClick={() => { base64InputRef.current = null; setInput(''); setResult('') }}>清空</Button></div>{result && <div className={`result-box ${result.startsWith('处理失败') ? 'error' : ''}`}><div className="result-title">输出结果 <span><button onClick={() => { void navigator.clipboard.writeText(result); message.success('已复制') }}>复制</button>{result.startsWith('data:image/') && <button onClick={() => void saveBase64Image()}>保存图片</button>}</span></div>{result.startsWith('data:image/') ? <><img src={result} alt="Base64 解码图片" style={{ maxWidth: 240, maxHeight: 180, display: 'block', marginTop: 8 }}/><pre>{result.slice(0, 100)}…</pre></> : <pre>{tool.title === 'Base64 工具' && result.length > 8000 ? `${result.slice(0, 8000)}…\n\n（内容较长，已仅显示预览；复制按钮可复制完整结果）` : result}</pre>}</div>}</div> : <><div className={`dropzone ${files.length ? 'compact' : ''}`} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); addFiles(event.dataTransfer.files) }} onClick={() => void browse()}><div className="upload-icon"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 15.5v3A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-3"/></svg></div><b>拖放文件到这里，或 <span>浏览文件</span></b><small>支持 {extensions.replaceAll('.', '').toUpperCase().replaceAll(',', ' · ')}，可一次选择多个文件</small><input ref={fileRef} hidden type="file" multiple accept={extensions} onChange={event => { if (event.target.files) addFiles(event.target.files); event.target.value = '' }}/></div>
             <div className="file-list-head"><span>待处理文件 <b>{files.length}</b></span><div className="head-actions"><button onClick={() => void browse()}>＋ 添加文件</button><button onClick={() => void browseFolder()}>＋ 添加文件夹</button><button onClick={() => setFiles([])} disabled={!files.length}>清空列表</button></div></div>
-            {files.length ? <div className="file-list">{files.map((file, index) => <div className="file-row" key={`${file.path || file.name}-${index}`} draggable onDragStart={() => { dragIndex.current = index }} onDragOver={event => event.preventDefault()} onDrop={() => { if (dragIndex.current !== null) moveFile(dragIndex.current, index); dragIndex.current = null }} title={file.detail}><div className={`file-badge ${ext(file.name).toLowerCase()}`}>{ext(file.name).slice(0, 4)}</div><div className="file-meta"><b>{file.name}</b><small>{fmtSize(file.size)} <span>·</span> {ext(file.name)}</small></div><div className="file-output-name"><Input aria-label={`${file.name} 的输出文件名`} value={file.outputName ?? ''} onChange={event => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, outputName: event.target.value } : item))} placeholder="输出文件名" addonAfter={`.${outputFormat.toLowerCase()}`} size="small" disabled={file.status !== 'ready'}/></div><div className={`file-status ${file.status}`}>{file.status === 'ready' ? '就绪' : file.status === 'queued' ? '排队中' : file.status === 'running' ? '处理中' : file.status === 'done' ? '已完成' : <button onClick={() => { setErrorDetail(file.detail || '未知错误'); setErrorModal(true) }}>查看错误</button>}</div><button className="remove-file" onClick={() => setFiles(current => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></div>)}</div> : <div className="empty-queue">文件将显示在这里 <span>⌄</span></div>}
+            {files.length ? <div className={`file-list ${isMediaTrim ? 'trim-file-list' : ''}`}>{files.map((file, index) => <div className="file-item" key={`${file.path || file.name}-${index}`}><div className="file-row" draggable onDragStart={() => { dragIndex.current = index }} onDragOver={event => event.preventDefault()} onDrop={() => { if (dragIndex.current !== null) moveFile(dragIndex.current, index); dragIndex.current = null }} title={file.detail}><div className={`file-badge ${ext(file.name).toLowerCase()}`}>{ext(file.name).slice(0, 4)}</div><div className="file-meta"><b>{file.name}</b><small>{fmtSize(file.size)} <span>·</span> {ext(file.name)}</small></div><div className="file-output-name"><Input aria-label={`${file.name} 的输出文件名`} value={file.outputName ?? ''} onChange={event => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, outputName: event.target.value } : item))} placeholder="输出文件名" addonAfter={`.${isMediaTrim ? ext(file.name).toLowerCase() : outputFormat.toLowerCase()}`} size="small" disabled={file.status !== 'ready'}/></div><div className={`file-status ${file.status}`}>{file.status === 'ready' ? '就绪' : file.status === 'queued' ? '排队中' : file.status === 'running' ? '处理中' : file.status === 'done' ? '已完成' : <button onClick={() => { setErrorDetail(file.detail || '未知错误'); setErrorModal(true) }}>查看错误</button>}</div><button className="remove-file" onClick={() => setFiles(current => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></div>{isMediaTrim && <div className="trim-segments"><div className="trim-segments-title">保留片段 <small>按时间先后拼接 · 单位：秒</small></div>{(file.segments || []).map((segment, segmentIndex) => <div className="trim-segment-row" key={segmentIndex}><InputNumber aria-label="片段开始秒数" min={0} step={0.1} precision={3} placeholder="开始" addonAfter="秒" value={segment.start} onChange={value => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).map((part, partIndex) => partIndex === segmentIndex ? { ...part, start: value } : part) } : item))}/><span>至</span><InputNumber aria-label="片段结束秒数" min={0} step={0.1} precision={3} placeholder="结束" addonAfter="秒" value={segment.end} onChange={value => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).map((part, partIndex) => partIndex === segmentIndex ? { ...part, end: value } : part) } : item))}/><Button size="small" className="trim-visual-button" onClick={() => setVisualTrim({ fileIndex: index, segmentIndex })}>可视化选择</Button>{(file.segments || []).length > 1 && <Tooltip title="删除片段"><button className="trim-segment-remove" aria-label="删除片段" onClick={() => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).filter((_, partIndex) => partIndex !== segmentIndex) } : item))}>×</button></Tooltip>}</div>)}<Tooltip title="添加保留片段"><button className="trim-segment-add" aria-label="添加保留片段" onClick={() => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: [...(item.segments || []), { start: null, end: null }] } : item))}><PlusCircleOutlined/></button></Tooltip></div>}</div>)}</div> : <div className="empty-queue">文件将显示在这里 <span>⌄</span></div>}
             <div className="options-row">
-              <div className="format-choice"><label>输出格式</label><Select value={outputFormat} onChange={setOutputFormat} options={formatChoices.map(value => ({ value, label: value }))} size="large"/></div>
+              {!isMediaTrim && <div className="format-choice"><label>输出格式</label><Select value={outputFormat} onChange={setOutputFormat} options={formatChoices.map(value => ({ value, label: value }))} size="large"/></div>}
               {category === '图片' && tool.title === '图片缩放' ? <div className="quality-control resize-control">
                 <label>缩放方式</label><Select size="small" value={resizeMode} onChange={value => setResizeMode(value as typeof resizeMode)} options={[{ value: 'percent', label: '按比例' }, { value: 'width', label: '按宽度' }, { value: 'height', label: '按高度' }]}/>
                 {resizeMode === 'percent' ? <><label>缩放比例 {resizePercent}%</label><input type="range" min={1} max={200} value={resizePercent} onChange={event => setResizePercent(Number(event.target.value))}/></> : <><label>目标{resizeMode === 'width' ? '宽度' : '高度'}（像素）</label><InputNumber size="small" min={1} addonAfter="px" value={resizeMode === 'width' ? resizeWidth : resizeHeight} onChange={value => resizeMode === 'width' ? setResizeWidth(Number(value || 1)) : setResizeHeight(Number(value || 1))}/><small className="option-hint">另一边按原图比例自动计算</small></>}
@@ -373,6 +535,18 @@ function App() {
         <footer className="app-footer"><span>FORMAT STUDIO <i>·</i> 版本 1.1</span><span>为本地工作而设计 <b>✳</b></span></footer>
       </div>
     </main>
+    <Modal title={isVideoTrim ? '视频片段可视化选择' : '音频片段可视化选择'} rootClassName="trim-preview-modal" centered open={!!visualTrim} onCancel={closeVisualTrim} width={820} footer={<><Button onClick={closeVisualTrim}>返回</Button><Button type="primary" disabled={previewLoading || !!previewError || previewRange[1] <= previewRange[0]} onClick={confirmPreviewRange}>确认片段</Button></>}>
+      {previewLoading && <div className="trim-preview-message">正在读取媒体并生成预览…</div>}
+      {previewError && <div className="trim-preview-message error">{previewError}</div>}
+      {!previewLoading && !previewError && previewUrl && <div className="trim-preview-content">
+        <div className="trim-preview-file">{visualTrim ? files[visualTrim.fileIndex]?.name : ''} <span>总时长 {previewDuration.toFixed(3)} 秒</span></div>
+        {isVideoTrim ? <div className="trim-video-player"><video ref={element => { previewMediaRef.current = element }} src={previewUrl} controls preload="metadata" onPlay={animatePreviewPlayhead} onPause={event => { syncPreviewPlayback(event.currentTarget); clipPreviewingRef.current = false; setClipPreviewActive(false); stopPreviewPlayhead() }} onEnded={event => { syncPreviewPlayback(event.currentTarget); clipPreviewingRef.current = false; setClipPreviewActive(false); stopPreviewPlayhead() }} onTimeUpdate={event => { const media = event.currentTarget; syncPreviewPlayback(media); if (clipPreviewingRef.current && media.currentTime >= previewRange[1]) { clipPreviewingRef.current = false; setClipPreviewActive(false); media.pause() } }} onLoadedMetadata={event => { event.currentTarget.currentTime = previewRange[0]; setPreviewTime(previewRange[0])}}/>{!previewHasAudio && <small>此视频没有音轨，预览仅播放画面。</small>}</div> : <><audio ref={element => { previewMediaRef.current = element }} src={previewUrl} controls preload="metadata" onPlay={animatePreviewPlayhead} onPause={event => { syncPreviewPlayback(event.currentTarget); clipPreviewingRef.current = false; setClipPreviewActive(false); stopPreviewPlayhead() }} onEnded={event => { syncPreviewPlayback(event.currentTarget); clipPreviewingRef.current = false; setClipPreviewActive(false); stopPreviewPlayhead() }} onTimeUpdate={event => { const media = event.currentTarget; syncPreviewPlayback(media); if (clipPreviewingRef.current && media.currentTime >= previewRange[1]) { clipPreviewingRef.current = false; setClipPreviewActive(false); media.pause() } }} onLoadedMetadata={event => { event.currentTarget.currentTime = previewRange[0]; setPreviewTime(previewRange[0]) }}/><div ref={previewWaveformRef} className="trim-waveform" role="group" aria-label="音频波形预览">{previewPeaks.map((peak, index) => <i key={index} style={{ height: `${Math.max(4, peak * 100)}%`, opacity: index / previewPeaks.length >= previewRange[0] / previewDuration && index / previewPeaks.length <= previewRange[1] / previewDuration ? 0.9 : 0.28 }}/>) }<span ref={previewPlayheadRef} className="trim-waveform-playhead" role="slider" aria-label="播放位置，可拖动定位" aria-valuemin={0} aria-valuemax={previewDuration} aria-valuenow={previewTime} tabIndex={0} style={{ left: '10px' }} onPointerDown={event => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); previewSeekingRef.current = true; seekPreviewFromPointer(event.clientX) }} onPointerMove={event => { if (previewSeekingRef.current) seekPreviewFromPointer(event.clientX) }} onPointerUp={finishPreviewSeek} onPointerCancel={finishPreviewSeek} onKeyDown={event => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); const media = previewMediaRef.current; if (media) { media.currentTime = Math.min(previewDuration, Math.max(0, media.currentTime + (event.key === 'ArrowRight' ? 1 : -1))); syncPreviewPlayback(media); setPreviewTime(media.currentTime) } }}/></div></>}
+        <div className="trim-preview-seek"><span ref={previewElapsedRef}>{previewTime.toFixed(3)} 秒</span><input ref={previewSeekRef} aria-label="播放位置" type="range" min={0} max={previewDuration || 1} step={0.001} value={Math.min(previewTime, previewDuration)} onChange={event => { const time = Number(event.target.value); setPreviewTime(time); if (previewMediaRef.current) { previewMediaRef.current.currentTime = time; syncPreviewPlayback(previewMediaRef.current) } }}/><span>{previewDuration.toFixed(3)} 秒</span></div>
+        <div className="trim-preview-range-label"><span>选择保留范围</span><InputNumber aria-label="保留片段开始时间" min={0} max={previewDuration} step={1} precision={3} addonAfter="秒" value={Number(previewRange[0].toFixed(3))} onChange={value => { if (value !== null) updatePreviewRange(0, Number(value)) }}/><span>至</span><InputNumber aria-label="保留片段结束时间" min={0} max={previewDuration} step={1} precision={3} addonAfter="秒" value={Number(previewRange[1].toFixed(3))} onChange={value => { if (value !== null) updatePreviewRange(1, Number(value)) }}/><div className="trim-clip-preview"><Tooltip title="试听片段"><Button type="text" aria-label="试听片段" className="trim-clip-play" icon={clipPreviewActive ? <PauseCircleOutlined/> : <PlayCircleOutlined/>} onClick={() => void toggleClipPreview()}/></Tooltip><span ref={clipPreviewElapsedRef}>0.000 秒</span><div ref={clipPreviewTrackRef} className="trim-clip-track"><span ref={clipPreviewFillRef} className="trim-clip-fill"/><span ref={clipPreviewThumbRef} className="trim-clip-thumb"/><input aria-label="试听片段进度" type="range" min={0} max={Math.max(0.001, previewRange[1] - previewRange[0])} step={0.001} defaultValue={0} onChange={event => { const media = previewMediaRef.current; const offset = Number(event.target.value); const duration = Math.max(0.001, previewRange[1] - previewRange[0]); const ratio = Math.min(1, offset / duration); if (clipPreviewFillRef.current) clipPreviewFillRef.current.style.transform = `scaleX(${ratio})`; if (clipPreviewThumbRef.current && clipPreviewTrackRef.current) clipPreviewThumbRef.current.style.transform = `translateX(${clipPreviewTrackRef.current.clientWidth * ratio}px)`; if (media) { media.currentTime = previewRange[0] + offset; if (clipPreviewElapsedRef.current) clipPreviewElapsedRef.current.textContent = `${offset.toFixed(3)} 秒` } }}/></div><span>{Math.max(0, previewRange[1] - previewRange[0]).toFixed(3)} 秒</span></div></div>
+        <div className="trim-range-controls"><label>开始<input aria-label="可视化片段开始" type="range" min={0} max={previewDuration || 1} step={0.001} value={previewRange[0]} onChange={event => updatePreviewRange(0, Number(event.target.value))}/></label><label>结束<input aria-label="可视化片段结束" type="range" min={0} max={previewDuration || 1} step={0.001} value={previewRange[1]} onChange={event => updatePreviewRange(1, Number(event.target.value))}/></label></div>
+        <p className="trim-preview-hint">拖动开始和结束滑块选择片段；也可以在播放器中试听或预览，再确认回填到当前行。</p>
+      </div>}
+    </Modal>
     <Modal title="转换错误详情" open={errorModal} onCancel={() => setErrorModal(false)} footer={<Button onClick={() => setErrorModal(false)}>关闭</Button>}><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '50vh', overflow: 'auto' }}>{errorDetail}</pre></Modal>
     <Modal title="图片压缩目标" rootClassName="compression-modal" open={compressionModal} onCancel={() => setCompressionModal(false)} onOk={() => void submitTask()} okText="开始压缩" cancelText="返回" width={680}>
       <p className="compression-help">显示每张图片的当前体积，并分别设置压缩后的目标上限。JPEG / WEBP 会调整图像质量，PNG 会在保留透明效果的情况下缩小尺寸。</p>

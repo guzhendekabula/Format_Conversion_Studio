@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('desktop', {
   selectDirectory: () => ipcRenderer.invoke('directory:select'),
   selectFolderFiles: (extensions) => ipcRenderer.invoke('folder:select', String(extensions || '').split(',').map(x => x.replace(/^\./, ''))),
   readFile: (filePath) => ipcRenderer.invoke('files:read', filePath),
+  registerMediaPreview: (filePath) => ipcRenderer.invoke('media:register-preview', filePath),
+  analyzeMedia: (filePath) => ipcRenderer.invoke('media:analyze', filePath),
   saveFile: (payload) => ipcRenderer.invoke('files:save', payload),
   getPathForFile: (file) => webUtils.getPathForFile(file),
   hashText: (algorithm, text) => ipcRenderer.invoke('utility:hash', { algorithm, text }),
