@@ -127,8 +127,15 @@ ipcMain.handle('jobs:clear-history', async () => { await taskQueue.writeHistory(
 ipcMain.handle('jobs:delete-history', async (_event, id) => { await taskQueue.deleteHistory(String(id)); return true })
 ipcMain.handle('files:show-in-folder', (_event, filePath) => {
   if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) throw new Error('文件路径无效')
-  shell.showItemInFolder(filePath)
-  return true
+  // Open the containing directory directly. This is more reliable on Windows
+  // than asking Explorer to reveal/select a specific output file.
+  return fs.stat(path.dirname(filePath)).then(stat => {
+    if (!stat.isDirectory()) throw new Error('目标文件夹不存在')
+    return shell.openPath(path.dirname(filePath)).then(error => {
+      if (error) throw new Error(error)
+      return true
+    })
+  })
 })
 ipcMain.handle('shell:open-external', async (_event, value) => {
   const url = new URL(String(value))
