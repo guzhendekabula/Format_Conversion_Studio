@@ -1,6 +1,8 @@
 export {}
 
 declare global {
+  const __APP_VERSION__: string
+
   interface Window {
     desktop?: {
       selectFiles: (extensions: string) => Promise<{ path: string; name: string; size: number }[]>

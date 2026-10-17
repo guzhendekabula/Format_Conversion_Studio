@@ -51,7 +51,8 @@
     "appId": "studio.formatconversion.app",
     "productName": "Format Conversion Studio",
     "directories": {
-      "buildResources": "build"
+      "buildResources": "build",
+      "output": "release"
     },
     "asarUnpack": [
       "node_modules/ffmpeg-static/**"
