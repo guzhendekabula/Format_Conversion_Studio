@@ -412,6 +412,17 @@ function App() {
       message.success('已删除这条历史记录')
     } catch (error) { message.error(`删除历史失败：${(error as Error).message}`) }
   }
+  const openHistoryFolder = async (entry: HistoryEntry) => {
+    if (!window.desktop?.showItemInFolder) return
+    for (const filePath of [entry.outputs[0], entry.inputs[0]]) {
+      if (!filePath) continue
+      try {
+        await window.desktop.showItemInFolder(filePath)
+        return
+      } catch { /* Older Windows history may contain a path damaged by console encoding. */ }
+    }
+    message.error('无法打开文件所在文件夹，请确认文件仍在原位置。')
+  }
   useEffect(() => {
     void refreshHistory()
     if (!window.desktop?.onJobEvent) return
@@ -710,7 +721,7 @@ function App() {
         </section>
         <section className="history-section" id="history"><div className="section-heading"><div><h2>最近活动</h2><p>查看近期处理的文件与任务状态</p></div><button onClick={async () => { if (window.desktop?.clearHistory) { await window.desktop.clearHistory(); setHistory([]); setHistoryPage(1) } else { setHistory([]); setHistoryPage(1) } }}>清除历史　→</button></div><div className="history-table"><div className="history-head"><span>文件名称</span><span>文件保存路径</span><span>处理时间</span><span>输出格式</span><span>状态</span><span>操作</span></div>{history.length ? history.slice((historyPage - 1) * 10, historyPage * 10).map(entry => {
           const savePath = entry.savePath || (entry.outputs[0] ? entry.outputs[0].replace(/[\\/][^\\/]*$/, '') : entry.inputs[0]?.replace(/[\\/][^\\/]*$/, '')) || '—'
-          return <div className="history-row" key={entry.id}><Tooltip title={entry.name}><span className="history-file"><i>▧</i>{entry.name}</span></Tooltip><Tooltip title={savePath}><span className="history-path">{savePath}</span></Tooltip><span>{new Date(entry.completedAt).toLocaleString()}</span><span>{entry.outputFormat || '—'} <small>· {(entry.elapsedMs / 1000).toFixed(1)} 秒</small></span><span className={entry.status === 'done' ? 'success-state' : 'error-state'}>{entry.status === 'done' ? '● 完成' : '● 失败'}</span><span className="history-actions">{entry.status === 'error' ? <Tooltip title="查看错误"><button aria-label="查看错误" onClick={() => { setErrorDetail(entry.detail || entry.error); setErrorModal(true) }}><FileSearchOutlined/></button></Tooltip> : <Tooltip title="打开文件所在文件夹"><button aria-label="打开文件所在文件夹" disabled={!entry.outputs[0]} onClick={() => entry.outputs[0] && window.desktop?.showItemInFolder(entry.outputs[0])}><FolderOpenOutlined/></button></Tooltip>}<Tooltip title="删除这条历史记录"><button className="history-delete" aria-label="删除这条历史记录" onClick={() => void deleteHistoryEntry(entry)}><DeleteOutlined/></button></Tooltip></span></div>
+          return <div className="history-row" key={entry.id}><Tooltip title={entry.name}><span className="history-file"><i>▧</i>{entry.name}</span></Tooltip><Tooltip title={savePath}><span className="history-path">{savePath}</span></Tooltip><span>{new Date(entry.completedAt).toLocaleString()}</span><span>{entry.outputFormat || '—'} <small>· {(entry.elapsedMs / 1000).toFixed(1)} 秒</small></span><span className={entry.status === 'done' ? 'success-state' : 'error-state'}>{entry.status === 'done' ? '● 完成' : '● 失败'}</span><span className="history-actions">{entry.status === 'error' ? <Tooltip title="查看错误"><button aria-label="查看错误" onClick={() => { setErrorDetail(entry.detail || entry.error); setErrorModal(true) }}><FileSearchOutlined/></button></Tooltip> : <Tooltip title="打开文件所在文件夹"><button aria-label="打开文件所在文件夹" disabled={!entry.outputs[0]} onClick={() => void openHistoryFolder(entry)}><FolderOpenOutlined/></button></Tooltip>}<Tooltip title="删除这条历史记录"><button className="history-delete" aria-label="删除这条历史记录" onClick={() => void deleteHistoryEntry(entry)}><DeleteOutlined/></button></Tooltip></span></div>
         }) : <div className="history-empty"><span className="history-empty-icon">◷</span><b>还没有转换记录</b><small>完成的任务会出现在这里，方便你快速查看。</small></div>}</div>{history.length > 10 && <Pagination className="history-pagination" current={historyPage} pageSize={10} total={history.length} showSizeChanger={false} onChange={page => setHistoryPage(page)}/>}</section>
         <footer className="app-footer"><span>FORMAT STUDIO <i>·</i> 版本 {__APP_VERSION__}</span><span>为本地工作而设计 <b>✳</b></span></footer>
       </div>

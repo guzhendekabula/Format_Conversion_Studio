@@ -8,7 +8,9 @@ from pathlib import Path
 
 
 def emit(event, **values):
-    print(json.dumps({"event": event, **values}, ensure_ascii=False), flush=True)
+    # Escape non-ASCII characters so the JSON-lines protocol stays ASCII even
+    # when a frozen Windows worker inherits a legacy console code page.
+    print(json.dumps({"event": event, **values}, ensure_ascii=True), flush=True)
 
 
 def unique_path(directory, stem, suffix):
