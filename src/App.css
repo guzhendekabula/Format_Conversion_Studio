@@ -57,3 +57,57 @@
 .crop-result-video-controls>input[aria-label="视频预览进度"]{flex:1}
 .crop-result-video-controls>input[aria-label="视频预览音量"]{width:90px}
 .crop-result-video-time{min-width:34px;font-size:12px;font-variant-numeric:tabular-nums}
+
+/* Media concatenation controls share the same compact rhythm as output location. */
+.media-concat-workspace .concat-file-actions{display:flex;align-items:center;justify-content:space-between;padding:10px 0 2px}
+.media-concat-workspace .concat-file-actions .ant-btn{height:31px;font-size:10px;border-radius:6px}
+.media-concat-workspace .concat-file-actions .concat-add-file-icon.ant-btn{width:31px;min-width:31px;padding:0!important;display:inline-flex;align-items:center;justify-content:center;color:var(--green);border:0;background:transparent;box-shadow:none}
+.media-concat-workspace .concat-file-actions .concat-add-file-icon.ant-btn .anticon{font-size:17px}
+.media-concat-workspace .concat-file-actions .concat-add-file-icon.ant-btn:hover{color:var(--green)!important;background:var(--green-soft)!important}
+.media-concat-workspace .concat-controls label{font-size:9px;line-height:14px;color:#939c95;font-weight:600;gap:7px}
+.media-concat-workspace .concat-controls .ant-input-affix-wrapper,.media-concat-workspace .concat-controls .ant-input-group-wrapper,.media-concat-workspace .concat-controls .ant-select-selector{min-height:31px!important;height:31px!important;font-size:10px}
+.media-concat-workspace .concat-controls .ant-select{height:31px!important;line-height:29px!important;font-size:10px;font-weight:400}
+.media-concat-workspace .concat-controls .ant-select .ant-select-selector{box-sizing:border-box;min-height:31px!important;height:31px!important;align-items:center}
+.media-concat-workspace .concat-controls .ant-select-selection-item{line-height:29px!important;font-size:10px;font-weight:400}
+.media-concat-workspace .concat-controls .option-hint{font-size:9px;line-height:14px;color:#939c95;font-weight:400;align-self:center}
+.concat-preview-modal-content>p{font-size:11px;color:#8b948d;margin:0 0 12px}
+.concat-preview-modal-content>video{display:block;width:100%;max-height:58vh;background:#111;border-radius:8px}
+.concat-preview-modal-content>audio{display:block;width:100%}
+.concat-preview-current{font-size:10px;color:#7e8981;margin-top:9px}
+.concat-preview-list{display:flex;gap:6px;overflow:auto;margin-top:10px}
+.concat-preview-list button{flex:0 0 auto;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid #e5ebe6;background:#fff;color:#66736a;border-radius:6px;padding:6px 9px;font-size:10px;cursor:pointer}
+.concat-preview-list button.active{border-color:#20835c;color:#20835c;background:#eff7f2}
+.dark .concat-preview-list button{background:#202421;border-color:#3a443d;color:#c3cec6}
+.image-editor-text-selection{position:absolute;box-sizing:border-box;border:1px dashed #16875e;background:rgba(35,162,113,.06);touch-action:none;cursor:move;z-index:2}
+.image-editor-text-handle{position:absolute;width:10px;height:10px;box-sizing:border-box;background:#fff;border:2px solid #16875e;border-radius:2px;touch-action:none}
+.image-editor-text-handle.nw{left:-5px;top:-5px;cursor:nwse-resize}.image-editor-text-handle.ne{right:-5px;top:-5px;cursor:nesw-resize}.image-editor-text-handle.sw{left:-5px;bottom:-5px;cursor:nesw-resize}.image-editor-text-handle.se{right:-5px;bottom:-5px;cursor:nwse-resize}
+.media-concat-workspace .concat-controls .ant-input-group .ant-input,.media-concat-workspace .concat-controls .ant-input-group-addon{height:31px!important}
+.media-concat-workspace .concat-controls .ant-input-group-addon{font-size:10px;font-weight:400}
+.media-concat-workspace .format-choice .ant-select-selector{height:31px!important}
+.media-concat-workspace .format-choice .ant-select-selection-item{line-height:29px!important}
+.image-editor-text-entry{display:flex;align-items:center;gap:4px;width:min(460px,42vw);min-width:220px}
+.image-editor-text-entry>.ant-input{min-width:0;flex:1}
+.image-editor-text-entry>.ant-btn{height:32px;width:32px;min-width:32px;padding:0;color:#23855f}
+.image-editor-text-entry>.ant-btn:hover{color:#176c4a!important;border-color:#23855f!important;background:#eef7f1!important}
+@media(max-width:700px){.image-editor-text-entry{width:100%;min-width:0}}
+.concat-preview-list{width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;flex-wrap:nowrap;scrollbar-width:thin;scrollbar-color:#b9c9bf #f1f4f2;padding:3px 2px 8px;cursor:grab}
+.concat-preview-list:active{cursor:grabbing}
+.concat-preview-list button{width:190px;min-width:190px;max-width:190px;height:38px;display:flex;align-items:center;gap:6px;text-align:left;box-sizing:border-box;user-select:none}
+.concat-preview-list button[draggable="true"]{cursor:grab}
+.concat-preview-list button[draggable="true"]:active{cursor:grabbing}
+.concat-preview-list .concat-preview-card{cursor:grab;touch-action:none;transition:transform 300ms cubic-bezier(.22,1,.36,1);will-change:transform}
+.concat-preview-list .concat-preview-card:active{cursor:grabbing}
+.concat-preview-list .concat-preview-card.dragging{opacity:0;pointer-events:none}
+.concat-preview-drag-ghost{position:fixed;left:0;top:0;z-index:1200;box-sizing:border-box;width:190px;height:38px;display:flex;align-items:center;padding:6px 9px;overflow:hidden;border:1px solid #20835c;border-radius:6px;background:#eff7f2;color:#20835c;box-shadow:0 8px 24px rgba(18,45,30,.18);font-size:10px;text-overflow:ellipsis;white-space:nowrap;pointer-events:none;will-change:transform}
+.dark .concat-preview-drag-ghost{background:#202421;color:#9ed8b7;border-color:#4a9b73}
+.concat-preview-index{flex:0 0 auto}
+.concat-preview-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.concat-preview-scroll-hint{display:block;margin-top:2px;color:#89938b;font-size:10px}
+.concat-preview-list::-webkit-scrollbar{height:8px}
+.concat-preview-list::-webkit-scrollbar-track{background:#f1f4f2;border-radius:8px}
+.concat-preview-list::-webkit-scrollbar-thumb{background:#b9c9bf;border-radius:8px}
+.file-list>.file-item{will-change:transform}
+.file-list>.file-item.dragging{opacity:0;pointer-events:none}
+.file-meta.sortable-file-meta{cursor:grab;touch-action:none;user-select:none}
+.file-meta.sortable-file-meta:active{cursor:grabbing}
+.file-list-drag-ghost{position:fixed!important;left:0!important;top:0!important;z-index:1200;box-sizing:border-box;padding:0 10px;border:1px solid #20835c!important;border-radius:8px;box-shadow:0 8px 24px rgba(18,45,30,.18);opacity:.98;pointer-events:none;will-change:transform}

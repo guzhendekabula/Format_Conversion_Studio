@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { Button, Dropdown, Input, InputNumber, message, Modal, Pagination, Select, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import { XMLBuilder, XMLParser, XMLValidator } from 'fast-xml-parser'
@@ -71,6 +72,28 @@ function App() {
   const [concatChannels, setConcatChannels] = useState('stereo')
   const [concatOutputName, setConcatOutputName] = useState('merged')
   const [concatNameCustomized, setConcatNameCustomized] = useState(false)
+  const [concatPreviewUrls, setConcatPreviewUrls] = useState<string[]>([])
+  const concatPreviewUrlsRef = useRef<string[]>([])
+  const [concatPreviewIndex, setConcatPreviewIndex] = useState(0)
+  const [concatPreviewOpen, setConcatPreviewOpen] = useState(false)
+  const [concatPreviewLoading, setConcatPreviewLoading] = useState(false)
+  const [concatPreviewDrag, setConcatPreviewDrag] = useState<string | null>(null)
+  const [fileListDragId, setFileListDragId] = useState<string | null>(null)
+  const concatPreviewDragGhostRef = useRef<HTMLDivElement>(null)
+  const concatPreviewDragPositionRef = useRef({ x: 0, y: 0 })
+  const concatPreviewDragOffsetRef = useRef({ x: 0, y: 0 })
+  const concatPreviewDragRef = useRef<{ id: string; index: number; startX: number; startY: number; moved: boolean } | null>(null)
+  const concatPreviewPointerCleanupRef = useRef<(() => void) | null>(null)
+  const concatPreviewCardRefs = useRef(new Map<string, HTMLButtonElement>())
+  const concatPreviewFlipRef = useRef<Map<string, { left: number; top: number }> | null>(null)
+  const fileListItemRefs = useRef(new Map<string, HTMLDivElement>())
+  const fileListFlipRef = useRef<Map<string, { left: number; top: number }> | null>(null)
+  const fileListDragGhostRef = useRef<HTMLDivElement>(null)
+  const fileListDragPositionRef = useRef({ x: 0, y: 0 })
+  const fileListDragOffsetRef = useRef({ x: 0, y: 0 })
+  const fileListDragRef = useRef<{ id: string; index: number; startX: number; startY: number; moved: boolean } | null>(null)
+  const fileListPointerCleanupRef = useRef<(() => void) | null>(null)
+  const suppressConcatPreviewClickRef = useRef(false)
   const [cropModalIndex, setCropModalIndex] = useState<number | null>(null)
   const [cropPreviewUrl, setCropPreviewUrl] = useState('')
   const [cropSize, setCropSize] = useState<[number, number]>([0, 0])
@@ -170,7 +193,6 @@ function App() {
   const trimResultFrameRef = useRef<number | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const devImageRef = useRef<HTMLInputElement>(null)
-  const dragIndex = useRef<number | null>(null)
   const isDev = category === '开发工具'
   const isAudioTrim = category === '音视频' && tool.title === '音频裁剪'
   const isVideoTrim = category === '音视频' && tool.title === '视频裁剪'
@@ -180,7 +202,28 @@ function App() {
     if (!isMediaConcat || concatNameCustomized) return
     setConcatOutputName(files.map(file => file.name.replace(/\.[^.]+$/, '')).join('+'))
   }, [isMediaConcat, concatNameCustomized, files])
+  useEffect(() => () => { concatPreviewUrlsRef.current.forEach(URL.revokeObjectURL) }, [])
   const isVideoConcat = category === '音视频' && tool.title === '视频拼接'
+  const openConcatPreview = async () => {
+    if (!files.length || !window.desktop?.readFile) return
+    setConcatPreviewLoading(true)
+    try {
+      const videoMimeTypes: Record<string, string> = { mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska' }
+      const audioMimeTypes: Record<string, string> = { mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac', ogg: 'audio/ogg' }
+      const urls = await Promise.all(files.map(async file => {
+        const bytes = await window.desktop!.readFile!(file.path)
+        const extension = file.name.split('.').pop()?.toLowerCase() || ''
+        const type = isVideoConcat ? (videoMimeTypes[extension] || 'video/mp4') : (audioMimeTypes[extension] || 'audio/mpeg')
+        return URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type }))
+      }))
+      concatPreviewUrlsRef.current.forEach(URL.revokeObjectURL)
+      concatPreviewUrlsRef.current = urls
+      setConcatPreviewUrls(urls)
+      setConcatPreviewIndex(0)
+      setConcatPreviewOpen(true)
+    } catch (error) { message.error(`无法预览拼接顺序：${(error as Error).message}`) }
+    finally { setConcatPreviewLoading(false) }
+  }
   const isImageCrop = category === '图片' && tool.title === '图片裁剪'
   const isImageEdit = category === '图片' && tool.title === '图片编辑'
   const isVideoFrameCrop = category === '音视频' && tool.title === '视频画面裁剪'
@@ -938,10 +981,210 @@ function App() {
     const directory = await window.desktop.selectDirectory()
     if (directory) setOutputDir(directory)
   }
-  const moveFile = (from: number, to: number) => setFiles(current => {
-    if (from === to || from < 0 || to < 0 || from >= current.length || to >= current.length) return current
-    const next = [...current]; const [item] = next.splice(from, 1); next.splice(to, 0, item); return next
-  })
+  const moveFile = (from: number, to: number) => {
+    if (from === to || from < 0 || to < 0 || from >= files.length || to >= files.length) return
+    fileListFlipRef.current = new Map([...fileListItemRefs.current].map(([id, node]) => { const rect = node.getBoundingClientRect(); return [id, { left: rect.left, top: rect.top }] }))
+    setFiles(current => {
+      if (from >= current.length || to >= current.length) return current
+      const next = [...current]; const [item] = next.splice(from, 1); next.splice(to, 0, item); return next
+    })
+  }
+  const startFileListDrag = (event: ReactPointerEvent<HTMLDivElement>, fileId: string, index: number) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    fileListPointerCleanupRef.current?.()
+    const pointerId = event.pointerId
+    const sourceRow = event.currentTarget.closest<HTMLElement>('.file-row')
+    const bounds = sourceRow?.getBoundingClientRect() ?? event.currentTarget.getBoundingClientRect()
+    fileListDragOffsetRef.current = { x: event.clientX - bounds.left, y: event.clientY - bounds.top }
+    fileListDragRef.current = { id: fileId, index, startX: event.clientX, startY: event.clientY, moved: false }
+    const ghost = sourceRow?.cloneNode(true) as HTMLDivElement | undefined
+    if (ghost) {
+      ghost.classList.add('file-list-drag-ghost')
+      ghost.removeAttribute('draggable')
+      ghost.style.width = `${bounds.width}px`
+      ghost.style.height = `${bounds.height}px`
+      ghost.style.visibility = 'hidden'
+      const sourceOutputName = sourceRow?.querySelector<HTMLElement>('.file-output-name')
+      const ghostOutputName = ghost.querySelector<HTMLElement>('.file-output-name')
+      if (sourceOutputName && ghostOutputName) ghostOutputName.style.display = getComputedStyle(sourceOutputName).display
+      const surface = sourceRow?.closest<HTMLElement>('.app-shell')
+      ghost.style.backgroundColor = surface ? getComputedStyle(surface).getPropertyValue('--panel').trim() : '#fff'
+      ghost.style.transform = `translate3d(${bounds.left}px, ${bounds.top}px, 0)`
+      document.body.appendChild(ghost)
+      fileListDragGhostRef.current = ghost
+    }
+    const handleMove = (pointerEvent: WindowEventMap['pointermove']) => {
+      if (pointerEvent.pointerId !== pointerId) return
+      const drag = fileListDragRef.current
+      if (!drag) return
+      const left = pointerEvent.clientX - fileListDragOffsetRef.current.x
+      const top = pointerEvent.clientY - fileListDragOffsetRef.current.y
+      fileListDragPositionRef.current = { x: left, y: top }
+      if (!drag.moved && Math.hypot(pointerEvent.clientX - drag.startX, pointerEvent.clientY - drag.startY) > 5) {
+        drag.moved = true
+        setFileListDragId(drag.id)
+        if (fileListDragGhostRef.current) fileListDragGhostRef.current.style.visibility = 'visible'
+      }
+      if (!drag.moved) return
+      if (fileListDragGhostRef.current) fileListDragGhostRef.current.style.transform = `translate3d(${left}px, ${top}px, 0)`
+      const list = document.querySelector<HTMLElement>('.file-list')
+      const hitTarget = document.elementFromPoint(pointerEvent.clientX, pointerEvent.clientY)?.closest<HTMLElement>('[data-file-index]')
+      const listBounds = list?.getBoundingClientRect()
+      const target = hitTarget ?? (list && listBounds && pointerEvent.clientY >= listBounds.top && pointerEvent.clientY <= listBounds.bottom
+        ? [...list.querySelectorAll<HTMLElement>('[data-file-index]')].filter(item => item.dataset.fileId !== drag.id).reduce<HTMLElement | null>((nearest, item) => {
+            if (!nearest) return item
+            const itemRect = item.getBoundingClientRect(), nearestRect = nearest.getBoundingClientRect()
+            return Math.abs(pointerEvent.clientY - (itemRect.top + itemRect.height / 2)) < Math.abs(pointerEvent.clientY - (nearestRect.top + nearestRect.height / 2)) ? item : nearest
+          }, null)
+        : null)
+      const to = Number(target?.dataset.fileIndex)
+      const targetRect = target?.getBoundingClientRect()
+      const midpoint = targetRect ? targetRect.top + targetRect.height / 2 : 0
+      const crossedTarget = target && (to > drag.index ? pointerEvent.clientY > midpoint : pointerEvent.clientY < midpoint)
+      if (Number.isInteger(to) && to !== drag.index && crossedTarget) {
+        moveFile(drag.index, to)
+        drag.index = to
+      }
+    }
+    const handleEnd = (pointerEvent: WindowEventMap['pointerup']) => {
+      if (pointerEvent.pointerId === pointerId) endFileListDrag()
+    }
+    const cleanup = () => {
+      window.removeEventListener('pointermove', handleMove)
+      window.removeEventListener('pointerup', handleEnd)
+      window.removeEventListener('pointercancel', handleEnd)
+      window.removeEventListener('blur', endFileListDrag)
+      fileListPointerCleanupRef.current = null
+    }
+    fileListPointerCleanupRef.current = cleanup
+    window.addEventListener('pointermove', handleMove)
+    window.addEventListener('pointerup', handleEnd)
+    window.addEventListener('pointercancel', handleEnd)
+    window.addEventListener('blur', endFileListDrag)
+  }
+  const endFileListDrag = () => {
+    fileListPointerCleanupRef.current?.()
+    fileListDragRef.current = null
+    fileListDragGhostRef.current?.remove()
+    fileListDragGhostRef.current = null
+    setFileListDragId(null)
+  }
+  const moveConcatPreviewFile = (from: number, to: number) => {
+    if (from === to || from < 0 || to < 0 || from >= files.length || to >= files.length) return
+    concatPreviewFlipRef.current = new Map([...concatPreviewCardRefs.current].map(([id, node]) => { const rect = node.getBoundingClientRect(); return [id, { left: rect.left, top: rect.top }] }))
+    moveFile(from, to)
+    setConcatPreviewUrls(current => { const next = [...current]; const [url] = next.splice(from, 1); next.splice(to, 0, url); return next })
+    setConcatPreviewIndex(current => current === from ? to : from < current && current <= to ? current - 1 : from > current && current >= to ? current + 1 : current)
+  }
+  useLayoutEffect(() => {
+    const previous = concatPreviewFlipRef.current
+    if (!previous) return
+    concatPreviewFlipRef.current = null
+    const animated: HTMLButtonElement[] = []
+    for (const [id, node] of concatPreviewCardRefs.current) {
+      const before = previous.get(id)
+      if (!before) continue
+      const rect = node.getBoundingClientRect(), dx = before.left - rect.left, dy = before.top - rect.top
+      if (!dx && !dy) continue
+      node.style.transition = 'none'
+      node.style.transform = `translate(${dx}px, ${dy}px)`
+      animated.push(node)
+    }
+    if (!animated.length) return
+    void animated[0].offsetWidth
+    requestAnimationFrame(() => animated.forEach(node => { node.style.transition = 'transform 300ms cubic-bezier(.22,1,.36,1)'; node.style.transform = '' }))
+  }, [files])
+  useLayoutEffect(() => {
+    const previous = fileListFlipRef.current
+    if (!previous) return
+    fileListFlipRef.current = null
+    const animated: HTMLDivElement[] = []
+    for (const [id, node] of fileListItemRefs.current) {
+      const before = previous.get(id)
+      if (!before) continue
+      const rect = node.getBoundingClientRect(), dx = before.left - rect.left, dy = before.top - rect.top
+      if (!dx && !dy) continue
+      node.style.transition = 'none'
+      node.style.transform = `translate(${dx}px, ${dy}px)`
+      animated.push(node)
+    }
+    if (!animated.length) return
+    void animated[0].offsetWidth
+    requestAnimationFrame(() => animated.forEach(node => { node.style.transition = 'transform 300ms cubic-bezier(.22,1,.36,1)'; node.style.transform = '' }))
+  }, [files])
+  const startConcatPreviewDrag = (event: ReactPointerEvent<HTMLButtonElement>, fileId: string, index: number) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    concatPreviewPointerCleanupRef.current?.()
+    const pointerId = event.pointerId
+    const cardBounds = event.currentTarget.getBoundingClientRect()
+    concatPreviewDragOffsetRef.current = { x: event.clientX - cardBounds.left, y: event.clientY - cardBounds.top }
+    concatPreviewDragRef.current = { id: fileId, index, startX: event.clientX, startY: event.clientY, moved: false }
+    suppressConcatPreviewClickRef.current = false
+    const handleMove = (pointerEvent: WindowEventMap['pointermove']) => {
+      if (pointerEvent.pointerId !== pointerId) return
+      updateConcatPreviewDragAt(pointerEvent.clientX, pointerEvent.clientY)
+    }
+    const handleEnd = (pointerEvent: WindowEventMap['pointerup']) => {
+      if (pointerEvent.pointerId === pointerId) endConcatPreviewDrag()
+    }
+    const cleanup = () => {
+      window.removeEventListener('pointermove', handleMove)
+      window.removeEventListener('pointerup', handleEnd)
+      window.removeEventListener('pointercancel', handleEnd)
+      window.removeEventListener('blur', endConcatPreviewDrag)
+      concatPreviewPointerCleanupRef.current = null
+    }
+    concatPreviewPointerCleanupRef.current = cleanup
+    window.addEventListener('pointermove', handleMove)
+    window.addEventListener('pointerup', handleEnd)
+    window.addEventListener('pointercancel', handleEnd)
+    window.addEventListener('blur', endConcatPreviewDrag)
+  }
+  const updateConcatPreviewDragAt = (clientX: number, clientY: number) => {
+    const drag = concatPreviewDragRef.current
+    if (!drag) return
+    const left = clientX - concatPreviewDragOffsetRef.current.x
+    const top = clientY - concatPreviewDragOffsetRef.current.y
+    concatPreviewDragPositionRef.current = { x: left, y: top }
+    if (!drag.moved && Math.hypot(clientX - drag.startX, clientY - drag.startY) > 5) { drag.moved = true; suppressConcatPreviewClickRef.current = true }
+    if (!drag.moved) return
+    setConcatPreviewDrag(drag.id)
+    if (concatPreviewDragGhostRef.current) concatPreviewDragGhostRef.current.style.transform = `translate3d(${left}px, ${top}px, 0)`
+    const list = document.querySelector<HTMLElement>('.concat-preview-list')
+    const hitTarget = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>('[data-concat-index]')
+    // While dragging below/above the single card row, the pointer may not hit a
+    // card at all. Resolve the target by horizontal proximity so vertical
+    // pointer movement does not disable reordering.
+    const target = hitTarget ?? (list && clientX >= list.getBoundingClientRect().left && clientX <= list.getBoundingClientRect().right
+      ? [...list.querySelectorAll<HTMLElement>('[data-concat-index]')].filter(card => card.dataset.concatId !== drag.id).reduce<HTMLElement | null>((nearest, card) => {
+          if (!nearest) return card
+          const cardRect = card.getBoundingClientRect(), nearestRect = nearest.getBoundingClientRect()
+          return Math.abs(clientX - (cardRect.left + cardRect.width / 2)) < Math.abs(clientX - (nearestRect.left + nearestRect.width / 2)) ? card : nearest
+        }, null)
+      : null)
+    const to = Number(target?.dataset.concatIndex)
+    const targetRect = target?.getBoundingClientRect()
+    const midpoint = targetRect ? targetRect.left + targetRect.width / 2 : 0
+    const crossedTarget = target && (to > drag.index ? clientX > midpoint : clientX < midpoint)
+    if (Number.isInteger(to) && to !== drag.index && crossedTarget) {
+      moveConcatPreviewFile(drag.index, to)
+      drag.index = to
+    }
+  }
+  const endConcatPreviewDrag = () => {
+    concatPreviewPointerCleanupRef.current?.()
+    concatPreviewDragRef.current = null
+    setConcatPreviewDrag(null)
+  }
+  useLayoutEffect(() => {
+    if (concatPreviewDrag && concatPreviewDragGhostRef.current) {
+      const { x, y } = concatPreviewDragPositionRef.current
+      concatPreviewDragGhostRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`
+    }
+  }, [concatPreviewDrag])
+  useEffect(() => () => { concatPreviewPointerCleanupRef.current?.(); fileListPointerCleanupRef.current?.() }, [])
 
   const doDeveloperAction = async (action: string) => {
     try {
@@ -1215,8 +1458,9 @@ function App() {
             <div className="capture-actions"><Button onClick={() => captureStream ? stopCapture() : void startCapture()}>{captureStream ? '停止预览' : '启动预览'}</Button><Button disabled={!captureRegion} onClick={() => { setCaptureRegion(null); captureRegionStartRef.current = null }}>清除选区</Button>{tool.title === '屏幕截图' ? <><Button type="primary" disabled={!captureStream} onClick={() => void takeScreenshot(false)}>保存截图</Button><Button disabled={!captureStream} onClick={() => void takeScreenshot(true)}>复制到剪贴板</Button></> : recording ? <><Button onClick={toggleRecordingPause}>{recordingPaused ? '继续录制' : '暂停录制'}</Button><Button type="primary" danger onClick={stopRecording}>停止录制</Button></> : recordingCountdown !== null ? <Button danger onClick={cancelRecordingCountdown}>取消倒计时</Button> : <Button type="primary" disabled={!captureStream} onClick={() => void startRecording()}>开始录制</Button>}<Button onClick={() => void window.desktop?.openCaptureSettings()}>系统权限设置</Button></div>
             <div className="capture-hint"><b>操作说明</b><ol><li>选择要捕获的屏幕或窗口，点击「启动预览」。</li><li>在预览画面中按住鼠标左键并拖动空白位置，可新建选区；拖动绿色框内部可移动选区，拖动四角控制点可调整大小。</li><li>点击「保存截图」或「开始录制」使用该范围；录制会先显示 3、2、1 倒计时。文件名称可编辑，扩展名由所选格式自动添加。</li><li>点击「清除选区」即可恢复捕获整个屏幕或窗口；点击「停止预览」会结束当前捕获预览。</li></ol><span>选区只在当前选择的屏幕或窗口范围内生效；没有绿色选区时，将使用完整来源画面。</span></div>
           </div> : isDev ? <div className="dev-workspace"><div className="editor-head"><span>输入内容</span><span className="editor-hint">{tool.title === 'Base64 工具' && base64InputRef.current ? '大型内容已暂存，不会完整显示在输入框中' : '在此粘贴或输入内容'}</span></div><Input.TextArea value={input} onChange={event => { base64InputRef.current = null; setInput(event.target.value) }} onPaste={event => { if (tool.title !== 'Base64 工具') return; const pasted = event.clipboardData.getData('text'); if (pasted.length < 16000) return; event.preventDefault(); base64InputRef.current = pasted; setInput(`已暂存大型 Base64 内容（约 ${(pasted.length * 0.75 / 1024 / 1024).toFixed(1)} MB），可点击“Base64 → 图片”解码`) }} placeholder={tool.title === 'JSON 工具' ? '{\n  "name": "Format Studio",\n  "local": true\n}' : '在此粘贴或输入内容…'} autoSize={{ minRows: 7, maxRows: 12 }} className="code-input"/><input ref={devImageRef} hidden type="file" accept="image/*" onChange={event => { if (event.target.files?.[0]) void selectBase64Image(event.target.files[0]); event.target.value = '' }}/><div className="editor-actions">{tool.title === 'JSON 工具' ? <>{runDev('格式化')}{runDev('压缩')}{runDev('校验')}</> : tool.title === 'URL 工具' ? <>{runDev('Encode')}{runDev('Decode')}</> : tool.title === 'Base64 工具' ? <>{runDev('Encode')}{runDev('Decode')}<Button onClick={() => window.desktop?.selectFiles ? void selectBase64Image() : devImageRef.current?.click()}>选择图片 → Base64</Button><Button onClick={decodeBase64Image}>Base64 → 图片</Button></> : tool.title === 'Hash 工具' ? <>{runDev('MD5')}{runDev('SHA1')}{runDev('SHA256')}</> : tool.title === 'YAML 转换' ? <>{runDev('JSON → YAML')}{runDev('YAML → JSON')}</> : <>{runDev('XML → JSON')}{runDev('JSON → XML')}</>}<Button onClick={() => { base64InputRef.current = null; setInput(''); setResult('') }}>清空</Button></div>{result && <div className={`result-box ${result.startsWith('处理失败') ? 'error' : ''}`}><div className="result-title">输出结果 <span><button onClick={() => { void navigator.clipboard.writeText(result); message.success('已复制') }}>复制</button>{result.startsWith('data:image/') && <button onClick={() => void saveBase64Image()}>保存图片</button>}</span></div>{result.startsWith('data:image/') ? <><img src={result} alt="Base64 解码图片" style={{ maxWidth: 240, maxHeight: 180, display: 'block', marginTop: 8 }}/><pre>{result.slice(0, 100)}…</pre></> : <pre>{tool.title === 'Base64 工具' && result.length > 8000 ? `${result.slice(0, 8000)}…\n\n（内容较长，已仅显示预览；复制按钮可复制完整结果）` : result}</pre>}</div>}</div> : <><div className={`dropzone ${files.length ? 'compact' : ''}`} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); addFiles(event.dataTransfer.files) }} onClick={() => void browse()}><div className="upload-icon"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 15.5v3A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-3"/></svg></div><b>拖放文件到这里，或 <span>浏览文件</span></b><small>支持 {extensions.replaceAll('.', '').toUpperCase().replaceAll(',', ' · ')}，可一次选择多个文件</small><input ref={fileRef} hidden type="file" multiple accept={extensions} onChange={event => { if (event.target.files) addFiles(event.target.files); event.target.value = '' }}/></div>
-            <div className="file-list-head"><span>待处理文件 <b>{files.length}</b></span><div className="head-actions"><button onClick={() => void browse()}>＋ 添加文件</button><button onClick={() => void browseFolder()}>＋ 添加文件夹</button><button onClick={() => setFiles([])} disabled={!files.length}>清空列表</button></div></div>
-            {files.length ? <div className={`file-list ${isMediaTrim ? 'trim-file-list' : ''}`}>{files.map((file, index) => <div className="file-item" key={file.id}><div className="file-row" draggable onDragStart={() => { dragIndex.current = index }} onDragOver={event => event.preventDefault()} onDrop={() => { if (dragIndex.current !== null) moveFile(dragIndex.current, index); dragIndex.current = null }} title={file.detail}><div className={`file-badge ${ext(file.name).toLowerCase()}`}>{ext(file.name).slice(0, 4)}</div><div className="file-meta"><b>{file.name}</b><small>{fmtSize(file.size)} <span>·</span> {ext(file.name)}</small></div>{!isImageEdit && <div className="file-output-name"><Tooltip title={file.outputName ?? ''}><Input aria-label={`${file.name} 的输出文件名`} value={file.outputName ?? ''} onChange={event => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, outputName: event.target.value } : item))} placeholder="输出文件名" addonAfter={`.${isMediaTrim ? ext(file.name).toLowerCase() : isVideoFrameCrop ? 'mp4' : outputFormat.toLowerCase()}`} size="small" disabled={file.status !== 'ready'}/></Tooltip></div>}<div className={`file-status ${file.status}`}>{file.status === 'ready' ? '就绪' : file.status === 'queued' ? '排队中' : file.status === 'running' ? '处理中' : file.status === 'done' ? '已完成' : <button onClick={() => { setErrorDetail(file.detail || '未知错误'); setErrorModal(true) }}>查看错误</button>}</div><button className="remove-file" onClick={() => setFiles(current => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></div>{(isImageCrop || isVideoFrameCrop) && <div className="image-crop-row crop-selection-row"><Button size="small" type="primary" ghost onClick={() => void openImageCrop(file, index)}>{isVideoFrameCrop ? "设置画面裁剪" : "设置裁剪区域"}</Button><span>{file.crop ? `X ${file.crop.x} · Y ${file.crop.y} · ${file.crop.width} × ${file.crop.height} px` : '尚未设置裁剪区域'}</span><Tooltip title="预览裁剪结果"><Button size="small" disabled={!file.crop} icon={<EyeOutlined/>} onClick={() => void openCropResultPreview(file, index)}>预览</Button></Tooltip></div>}{isImageEdit && <div className="image-crop-row"><Button size="small" type="primary" ghost onClick={() => openImageEditor(file)}>{editedImages[file.id] ? editedImages[file.id].exported ? '重新编辑' : '继续编辑' : '打开编辑器'}</Button><span>{editedImages[file.id] ? editedImages[file.id].exported ? '已导出' : '编辑已确认，可批量导出' : '支持撤销和重做'}</span></div>}{isMediaTrim && <div className="trim-segments"><div className="trim-segments-title">保留片段 <small>按时间先后拼接 · 单位：秒</small><small className="trim-duration-hint">{file.durationLoading ? "正在读取文件时长…" : file.duration !== undefined ? `文件时长 ${file.duration.toFixed(3)} 秒` : file.durationError ? "无法读取文件时长" : ""}</small></div>{(file.segments || []).map((segment, segmentIndex) => { const segmentError = trimSegmentError(file, segmentIndex); return <div className={`trim-segment-row${segmentError ? " has-error" : ""}`} key={segmentIndex}><div className="trim-time-range"><InputNumber aria-label="片段开始秒数" min={0} max={file.duration} status={segmentError ? "error" : undefined} step={0.1} precision={3} placeholder="开始" addonAfter="秒" value={segment.start} onChange={value => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).map((part, partIndex) => partIndex === segmentIndex ? { ...part, start: value } : part) } : item))}/><span>至</span><InputNumber aria-label="片段结束秒数" min={0} max={file.duration} status={segmentError ? "error" : undefined} step={0.1} precision={3} placeholder="结束" addonAfter="秒" value={segment.end} onChange={value => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).map((part, partIndex) => partIndex === segmentIndex ? { ...part, end: value } : part) } : item))}/></div><Button size="small" className="trim-visual-button" onClick={() => setVisualTrim({ fileIndex: index, segmentIndex })}>可视化选择</Button>{segmentIndex === (file.segments || []).length - 1 ? <Tooltip title="预览裁剪后的效果"><Button type="text" aria-label="预览裁剪后的效果" className="trim-segment-preview-icon" icon={<PlayCircleOutlined/>} onClick={() => void openTrimResultPreview(file, index)}/></Tooltip> : <span className="trim-segment-preview-placeholder" aria-hidden="true"/>}{(file.segments || []).length > 1 && <Tooltip title="删除片段"><button className="trim-segment-remove" aria-label="删除片段" onClick={() => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).filter((_, partIndex) => partIndex !== segmentIndex) } : item))}>×</button></Tooltip>}{segmentError && <small className="trim-segment-error">{segmentError}</small>}</div> })}<Tooltip title="添加保留片段"><button className="trim-segment-add" aria-label="添加保留片段" onClick={() => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: [...(item.segments || []), { start: null, end: null }] } : item))}><PlusCircleOutlined/></button></Tooltip></div>}</div>)}</div> : <div className="empty-queue">文件将显示在这里 <span>⌄</span></div>}
+            <div className="file-list-head"><span>待处理文件 <b>{files.length}</b></span><div className="head-actions">{!isMediaConcat && <><button onClick={() => void browse()}>＋ 添加文件</button><button onClick={() => void browseFolder()}>＋ 添加文件夹</button></>}<button onClick={() => setFiles([])} disabled={!files.length}>清空列表</button></div></div>
+            {files.length ? <div className={`file-list ${isMediaTrim ? 'trim-file-list' : ''}`}>{files.map((file, index) => <div className={`file-item${fileListDragId === file.id ? " dragging" : ""}`} key={file.id} data-file-index={index} data-file-id={file.id} ref={node => { if (node) fileListItemRefs.current.set(file.id, node); else fileListItemRefs.current.delete(file.id) }}><div className="file-row" title={file.detail}><div className={`file-badge ${ext(file.name).toLowerCase()}`}>{ext(file.name).slice(0, 4)}</div><div className="file-meta sortable-file-meta" title={file.name} onPointerDown={event => startFileListDrag(event, file.id, index)}><b>{file.name}</b><small>{fmtSize(file.size)} <span>·</span> {ext(file.name)}</small></div>{!isImageEdit && <div className="file-output-name"><Tooltip title={file.outputName ?? ''}><Input aria-label={`${file.name} 的输出文件名`} value={file.outputName ?? ''} onChange={event => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, outputName: event.target.value } : item))} placeholder="输出文件名" addonAfter={`.${isMediaTrim ? ext(file.name).toLowerCase() : isVideoFrameCrop ? 'mp4' : outputFormat.toLowerCase()}`} size="small" disabled={file.status !== 'ready'}/></Tooltip></div>}<div className={`file-status ${file.status}`}>{file.status === 'ready' ? '就绪' : file.status === 'queued' ? '排队中' : file.status === 'running' ? '处理中' : file.status === 'done' ? '已完成' : <button onClick={() => { setErrorDetail(file.detail || '未知错误'); setErrorModal(true) }}>查看错误</button>}</div><button className="remove-file" onClick={() => setFiles(current => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></div>{(isImageCrop || isVideoFrameCrop) && <div className="image-crop-row crop-selection-row"><Button size="small" type="primary" ghost onClick={() => void openImageCrop(file, index)}>{isVideoFrameCrop ? "设置画面裁剪" : "设置裁剪区域"}</Button><span>{file.crop ? `X ${file.crop.x} · Y ${file.crop.y} · ${file.crop.width} × ${file.crop.height} px` : '尚未设置裁剪区域'}</span><Tooltip title="预览裁剪结果"><Button size="small" disabled={!file.crop} icon={<EyeOutlined/>} onClick={() => void openCropResultPreview(file, index)}>预览</Button></Tooltip></div>}{isImageEdit && <div className="image-crop-row"><Button size="small" type="primary" ghost onClick={() => openImageEditor(file)}>{editedImages[file.id] ? editedImages[file.id].exported ? '重新编辑' : '继续编辑' : '打开编辑器'}</Button><span>{editedImages[file.id] ? editedImages[file.id].exported ? '已导出' : '编辑已确认，可批量导出' : '支持撤销和重做'}</span></div>}{isMediaTrim && <div className="trim-segments"><div className="trim-segments-title">保留片段 <small>按时间先后拼接 · 单位：秒</small><small className="trim-duration-hint">{file.durationLoading ? "正在读取文件时长…" : file.duration !== undefined ? `文件时长 ${file.duration.toFixed(3)} 秒` : file.durationError ? "无法读取文件时长" : ""}</small></div>{(file.segments || []).map((segment, segmentIndex) => { const segmentError = trimSegmentError(file, segmentIndex); return <div className={`trim-segment-row${segmentError ? " has-error" : ""}`} key={segmentIndex}><div className="trim-time-range"><InputNumber aria-label="片段开始秒数" min={0} max={file.duration} status={segmentError ? "error" : undefined} step={0.1} precision={3} placeholder="开始" addonAfter="秒" value={segment.start} onChange={value => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).map((part, partIndex) => partIndex === segmentIndex ? { ...part, start: value } : part) } : item))}/><span>至</span><InputNumber aria-label="片段结束秒数" min={0} max={file.duration} status={segmentError ? "error" : undefined} step={0.1} precision={3} placeholder="结束" addonAfter="秒" value={segment.end} onChange={value => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).map((part, partIndex) => partIndex === segmentIndex ? { ...part, end: value } : part) } : item))}/></div><Button size="small" className="trim-visual-button" onClick={() => setVisualTrim({ fileIndex: index, segmentIndex })}>可视化选择</Button>{segmentIndex === (file.segments || []).length - 1 ? <Tooltip title="预览裁剪后的效果"><Button type="text" aria-label="预览裁剪后的效果" className="trim-segment-preview-icon" icon={<PlayCircleOutlined/>} onClick={() => void openTrimResultPreview(file, index)}/></Tooltip> : <span className="trim-segment-preview-placeholder" aria-hidden="true"/>}{(file.segments || []).length > 1 && <Tooltip title="删除片段"><button className="trim-segment-remove" aria-label="删除片段" onClick={() => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: (item.segments || []).filter((_, partIndex) => partIndex !== segmentIndex) } : item))}>×</button></Tooltip>}{segmentError && <small className="trim-segment-error">{segmentError}</small>}</div> })}<Tooltip title="添加保留片段"><button className="trim-segment-add" aria-label="添加保留片段" onClick={() => setFiles(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, segments: [...(item.segments || []), { start: null, end: null }] } : item))}><PlusCircleOutlined/></button></Tooltip></div>}</div>)}</div> : <div className="empty-queue">文件将显示在这里 <span>⌄</span></div>}
+            {isMediaConcat && files.length > 0 && <div className="concat-file-actions"><Tooltip title="添加文件"><Button className="concat-add-file-icon" type="text" aria-label="添加文件" icon={<PlusCircleOutlined/>} onClick={() => void browse()}/></Tooltip><Tooltip title="按当前列表顺序逐个预览"><Button icon={<EyeOutlined/>} loading={concatPreviewLoading} onClick={() => void openConcatPreview()}>预览拼接顺序</Button></Tooltip></div>}
             <div className="options-row">
               {!isMediaTrim && !isVideoFrameCrop && <div className="format-choice"><label>输出格式</label><Select value={outputFormat} onChange={setOutputFormat} options={formatChoices.map(value => ({ value, label: value }))} size="large"/></div>}
               {isMediaConcat ? <div className="concat-controls">
@@ -1265,6 +1509,9 @@ function App() {
     </Modal>
     <Modal title="裁剪结果预览" rootClassName="crop-result-preview-modal" centered open={cropResultPreview !== null} onCancel={closeCropResultPreview} footer={<Button onClick={closeCropResultPreview}>关闭</Button>} width={900}>
       {cropResultPreview && <div className="crop-result-preview"><div className="crop-result-preview-window" style={{ width: cropResultPreview.crop.width * cropResultScale, height: cropResultPreview.crop.height * cropResultScale }}>{cropResultPreview.video ? <video ref={cropResultVideoRef} src={cropResultPreview.url} playsInline onLoadedMetadata={event => { const video = event.currentTarget; setCropResultPreviewSize([video.videoWidth, video.videoHeight]); setCropResultVideoDuration(video.duration || 0) }} onTimeUpdate={syncCropResultVideoProgress} onPlay={() => { setCropResultVideoPlaying(true); animateCropResultVideoProgress() }} onPause={() => { setCropResultVideoPlaying(false); syncCropResultVideoProgress(); if (cropResultVideoFrameRef.current !== null) cancelAnimationFrame(cropResultVideoFrameRef.current); cropResultVideoFrameRef.current = null }} onEnded={() => { setCropResultVideoPlaying(false); syncCropResultVideoProgress(); if (cropResultVideoFrameRef.current !== null) cancelAnimationFrame(cropResultVideoFrameRef.current); cropResultVideoFrameRef.current = null }} style={{ width: cropResultPreviewSize[0] * cropResultScale, height: cropResultPreviewSize[1] * cropResultScale, left: -cropResultPreview.crop.x * cropResultScale, top: -cropResultPreview.crop.y * cropResultScale }}/> : <img src={cropResultPreview.url} alt="裁剪结果" onLoad={event => setCropResultPreviewSize([event.currentTarget.naturalWidth, event.currentTarget.naturalHeight])} style={{ width: cropResultPreviewSize[0] * cropResultScale, height: cropResultPreviewSize[1] * cropResultScale, left: -cropResultPreview.crop.x * cropResultScale, top: -cropResultPreview.crop.y * cropResultScale }}/>}</div>{cropResultPreview.video && <div className="crop-result-video-controls"><Button type="text" aria-label={cropResultVideoPlaying ? '暂停' : '播放'} icon={cropResultVideoPlaying ? <PauseCircleOutlined/> : <PlayCircleOutlined/>} onClick={() => { const video = cropResultVideoRef.current; if (!video) return; if (video.paused) void video.play().catch(error => message.error((error as Error).message || '视频播放失败')); else video.pause() }}/><span ref={cropResultVideoElapsedRef} className="crop-result-video-time">0:00</span><input aria-label="视频预览进度" type="range" min={0} max={cropResultVideoDuration || 1} step={0.05} defaultValue={0} ref={cropResultVideoSeekRef} onChange={event => { const time = Number(event.target.value); if (cropResultVideoRef.current) cropResultVideoRef.current.currentTime = time; syncCropResultVideoProgress() }}/><span className="crop-result-video-time">{`${Math.floor(cropResultVideoDuration / 60)}:${String(Math.floor(cropResultVideoDuration % 60)).padStart(2, '0')}`}</span><Button type="text" aria-label={cropResultVideoMuted ? '取消静音' : '静音'} onClick={() => { const muted = !cropResultVideoMuted; setCropResultVideoMuted(muted); if (cropResultVideoRef.current) cropResultVideoRef.current.muted = muted }}>{cropResultVideoMuted ? '静音' : '音量'}</Button><input aria-label="视频预览音量" type="range" min={0} max={1} step={0.01} value={cropResultVideoVolume} onChange={event => { const volume = Number(event.target.value); setCropResultVideoVolume(volume); setCropResultVideoMuted(volume === 0); if (cropResultVideoRef.current) { cropResultVideoRef.current.volume = volume; cropResultVideoRef.current.muted = volume === 0 } }}/></div>}<span>{cropResultPreview.crop.width} × {cropResultPreview.crop.height} px · {files[cropResultPreview.index]?.name}</span></div>}
+    </Modal>
+    <Modal title={isVideoConcat ? '视频拼接顺序预览' : '音频拼接顺序预览'} centered open={concatPreviewOpen} onCancel={() => setConcatPreviewOpen(false)} footer={<Button onClick={() => setConcatPreviewOpen(false)}>关闭</Button>} width={760} destroyOnClose>
+      {concatPreviewUrls.length > 0 && <div className="concat-preview-modal-content"><p>{isVideoConcat ? '按待处理列表的顺序依次播放；拖动下方视频卡片可调整顺序，或在文件列表中拖动文件名调整顺序。' : '按待处理列表的顺序依次播放；拖动下方音频卡片可调整顺序，或在文件列表中拖动文件名调整顺序。'}此处用于检查顺序，最终输出仍使用下方设置的编码参数。</p>{isVideoConcat ? <video key={concatPreviewIndex} src={concatPreviewUrls[concatPreviewIndex]} controls autoPlay playsInline onEnded={() => setConcatPreviewIndex(index => Math.min(index + 1, concatPreviewUrls.length - 1))}/> : <audio key={concatPreviewUrls[concatPreviewIndex]} src={concatPreviewUrls[concatPreviewIndex]} controls autoPlay onEnded={() => setConcatPreviewIndex(index => Math.min(index + 1, concatPreviewUrls.length - 1))}/>}<div className="concat-preview-current">{concatPreviewIndex + 1} / {concatPreviewUrls.length} · {files[concatPreviewIndex]?.name}</div><div className="concat-preview-list" role="list" aria-label="拼接顺序；拖动可调整">{files.map((file, index) => <Tooltip key={file.id} title={file.name}><button ref={node => { if (node) concatPreviewCardRefs.current.set(file.id, node); else concatPreviewCardRefs.current.delete(file.id) }} role="listitem" data-concat-index={index} data-concat-id={file.id} className={`concat-preview-card${index === concatPreviewIndex ? ' active' : ''}${concatPreviewDrag === file.id ? ' dragging' : ''}`} title={file.name} onPointerDown={event => startConcatPreviewDrag(event, file.id, index)} onClick={() => { if (suppressConcatPreviewClickRef.current) { suppressConcatPreviewClickRef.current = false; return } setConcatPreviewIndex(index) }}><span className="concat-preview-index">{index + 1}.</span><span className="concat-preview-name">{file.name}</span></button></Tooltip>)}</div>{concatPreviewDrag && createPortal(<div ref={concatPreviewDragGhostRef} className="concat-preview-drag-ghost">{files.find(file => file.id === concatPreviewDrag)?.name}</div>, document.body)}<small className="concat-preview-scroll-hint">{isVideoConcat ? '文件较多时可横向滚动浏览；拖动卡片调整顺序' : '音频较多时可横向滚动浏览；拖动卡片调整顺序'}</small></div>}
     </Modal>
     <Modal title={isVideoFrameCrop ? "视频画面裁剪" : "图片裁剪"} rootClassName="image-crop-modal" centered open={cropModalIndex !== null} afterOpenChange={open => { if (open) requestAnimationFrame(() => requestAnimationFrame(() => { syncCropMediaFrame(); setCropFrameReady(true) })) }} onCancel={closeImageCrop} width={860} footer={<><Button onClick={closeImageCrop}>返回</Button><Button type="primary" disabled={!cropRect.width || !cropRect.height} onClick={() => { if (cropModalIndex === null) return; setFiles(current => current.map((file, index) => index === cropModalIndex ? { ...file, crop: cropRect, outputName: `${file.name.replace(/\.[^.]+$/, '')}_crop` } : file)); closeImageCrop() }}>确认裁剪区域</Button></>}>
       {cropPreviewUrl && <div className="image-crop-content"><div ref={cropStageRef} className="image-crop-stage" onDragStart={event => event.preventDefault()} onPointerDown={beginCropSelection} onPointerMove={updateCropFromPointer} onPointerUp={event => { cropDragRef.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId) }}>{isVideoFrameCrop ? <video ref={cropVideoRef} src={cropPreviewUrl} autoPlay muted loop playsInline onLoadedMetadata={event => { const video = event.currentTarget; setCropSize([video.videoWidth, video.videoHeight]); setCropRect(current => current.width ? current : { x: 0, y: 0, width: video.videoWidth, height: video.videoHeight }); requestAnimationFrame(syncCropMediaFrame) }}/> : <img ref={cropImageRef} src={cropPreviewUrl} alt="裁剪预览" draggable={false} onDragStart={event => event.preventDefault()} onLoad={event => { const image = event.currentTarget; setCropSize([image.naturalWidth, image.naturalHeight]); setCropRect(current => current.width ? current : { x: 0, y: 0, width: image.naturalWidth, height: image.naturalHeight }); requestAnimationFrame(syncCropMediaFrame) }}/>}{cropSize[0] > 0 && cropFrameReady && cropMediaFrame.width > 0 && cropMediaFrame.height > 0 && <div className="image-crop-selection" onPointerDown={beginCropMove} style={{ left: cropMediaFrame.left + cropRect.x / cropSize[0] * cropMediaFrame.width, top: cropMediaFrame.top + cropRect.y / cropSize[1] * cropMediaFrame.height, width: cropRect.width / cropSize[0] * cropMediaFrame.width, height: cropRect.height / cropSize[1] * cropMediaFrame.height }}>{['nw', 'ne', 'sw', 'se'].map(handle => <span key={handle} className={'image-crop-handle ' + handle} onPointerDown={event => beginCropResize(event, handle)}/>)}</div>}</div><div className="image-crop-controls"><span>原图 {cropSize[0]} × {cropSize[1]} px</span><Select className="image-crop-aspect-select" size="small" style={{ width: 120, minWidth: 120 }} popupMatchSelectWidth={150} value={cropAspect ?? 0} onChange={value => changeCropAspect(value || null)} options={[{ value: 0, label: '自由比例' }, { value: 1, label: '1:1' }, { value: 3/4, label: '3:4' }, { value: 4/3, label: '4:3' }, { value: 16/9, label: '16:9' }, { value: 9/16, label: '9:16' }]}/>{(['x','y','width','height'] as const).map(key => <label key={key}>{({x:'X',y:'Y',width:'宽度',height:'高度'})[key]}<InputNumber min={key === 'width' || key === 'height' ? 1 : 0} max={key === 'x' || key === 'width' ? cropSize[0] : cropSize[1]} value={cropRect[key]} onChange={value => setCropRect(current => ({ ...current, [key]: Number(value || 0) }))}/></label>)}</div><small>拖动空白区域新建选区；拖动绿色框可移动，拖动四角可缩放。固定比例按裁剪结果的宽:高计算。</small></div>}

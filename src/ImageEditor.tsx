@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from 'react'
 import { Button, Input, InputNumber, message, Modal, Select, Tooltip } from 'antd'
-import { RedoOutlined, RotateLeftOutlined, RotateRightOutlined, UndoOutlined } from '@ant-design/icons'
+import { CheckOutlined, RedoOutlined, RotateLeftOutlined, RotateRightOutlined, UndoOutlined } from '@ant-design/icons'
 
 type Point = { x: number; y: number }
 export type ImageEditAction =
@@ -11,6 +11,7 @@ export type ImageEditAction =
 type Props = { open: boolean; path: string; fileName: string; outputFormat: string; initialActions?: ImageEditAction[]; onClose: () => void; onConfirm: (result: { data: number[]; extension: string; actions: ImageEditAction[] }) => void }
 type Tool = 'crop' | 'rotate' | 'text' | 'brush' | 'mosaic'
 type CropDrag = { mode: 'new' | 'move' | 'resize'; start: Point; original: { x: number; y: number; width: number; height: number }; handle?: 'nw' | 'ne' | 'sw' | 'se' }
+type TextDrag = { mode: 'move' | 'resize'; start: Point; original: Extract<ImageEditAction, { type: 'text' }>; handle?: 'nw' | 'ne' | 'sw' | 'se'; historyRecorded?: boolean }
 
 function paintAction(canvas: HTMLCanvasElement, action: ImageEditAction) {
   const context = canvas.getContext('2d')
@@ -76,14 +77,18 @@ export default function ImageEditor({ open, path, fileName, outputFormat, initia
   const sourceRef = useRef<HTMLImageElement | null>(null)
   const activeActionRef = useRef<ImageEditAction | null>(null)
   const cropDragRef = useRef<CropDrag | null>(null)
+  const textDragRef = useRef<TextDrag | null>(null)
   const [previewUrl, setPreviewUrl] = useState('')
   const [actions, setActions] = useState<ImageEditAction[]>([])
-  const [redoActions, setRedoActions] = useState<ImageEditAction[]>([])
+  const [pastActions, setPastActions] = useState<ImageEditAction[][]>([])
+  const [redoActions, setRedoActions] = useState<ImageEditAction[][]>([])
   const [tool, setTool] = useState<Tool>('crop')
   const [cropRect, setCropRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null)
   const [canvasSize, setCanvasSize] = useState<[number, number]>([0, 0])
   const [text, setText] = useState('')
+  const [textPlacementPending, setTextPlacementPending] = useState(false)
   const [textSize, setTextSize] = useState(48)
+  const [selectedTextIndex, setSelectedTextIndex] = useState<number | null>(null)
   const [color, setColor] = useState('#e53935')
   const [brushSize, setBrushSize] = useState(12)
   const [mosaicSize, setMosaicSize] = useState(18)
@@ -121,7 +126,7 @@ export default function ImageEditor({ open, path, fileName, outputFormat, initia
   useEffect(() => {
     if (!previewUrl) return
     const image = new Image()
-    image.onload = () => { sourceRef.current = image; setActions(initialActions || []); setRedoActions([]); setCropRect(null); renderActions(initialActions || []) }
+    image.onload = () => { const restoredActions = initialActions || []; sourceRef.current = image; setActions(restoredActions); setPastActions(restoredActions.map((_, index) => restoredActions.slice(0, index))); setRedoActions([]); setCropRect(null); renderActions(restoredActions) }
     image.onerror = () => message.error('图片预览读取失败')
     image.src = previewUrl
     return () => { image.onload = null; if (sourceRef.current === image) sourceRef.current = null }
@@ -130,13 +135,33 @@ export default function ImageEditor({ open, path, fileName, outputFormat, initia
   useEffect(() => { if (sourceRef.current) renderActions(actions) }, [actions, renderActions])
 
   const commit = (action: ImageEditAction) => {
+    setPastActions(current => [...current.slice(-39), actions])
     setActions(current => [...current.slice(-39), action])
+    setRedoActions([])
+  }
+  const getTextBounds = (action: Extract<ImageEditAction, { type: 'text' }>) => {
+    const context = canvasRef.current?.getContext('2d')
+    if (!context) return { x: action.x, y: action.y, width: Math.max(action.size, action.text.length * action.size * 0.6), height: action.size * 1.25 }
+    context.save(); context.font = `600 ${action.size}px system-ui, sans-serif`
+    const width = context.measureText(action.text).width
+    context.restore()
+    return { x: action.x, y: action.y, width, height: action.size * 1.25 }
+  }
+  const updateTextAction = (index: number, patch: Partial<Extract<ImageEditAction, { type: 'text' }>>, recordHistory = true) => {
+    if (recordHistory) setPastActions(current => [...current.slice(-39), actions])
+    setActions(current => current.map((action, actionIndex) => actionIndex === index && action.type === 'text' ? { ...action, ...patch } : action))
     setRedoActions([])
   }
   const pointFromEvent = (event: PointerEvent<HTMLCanvasElement>): Point => {
     const canvas = canvasRef.current!, bounds = canvas.getBoundingClientRect()
     return { x: Math.max(0, Math.min(canvas.width, (event.clientX - bounds.left) * canvas.width / bounds.width)), y: Math.max(0, Math.min(canvas.height, (event.clientY - bounds.top) * canvas.height / bounds.height)) }
   }
+  const pointFromClient = (clientX: number, clientY: number): Point => {
+    const canvas = canvasRef.current!, bounds = canvas.getBoundingClientRect()
+    return { x: Math.max(0, Math.min(canvas.width, (clientX - bounds.left) * canvas.width / bounds.width)), y: Math.max(0, Math.min(canvas.height, (clientY - bounds.top) * canvas.height / bounds.height)) }
+  }
+  const selectedAction = selectedTextIndex === null ? undefined : actions[selectedTextIndex]
+  const selectedText = selectedAction?.type === 'text' ? selectedAction : null
   const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     if (event.button !== 0 || !canvasRef.current) return
     if (tool === 'rotate') return
@@ -160,8 +185,16 @@ export default function ImageEditor({ open, path, fileName, outputFormat, initia
       return
     }
     if (tool === 'text') {
+      const hitIndex = actions.map((action, index) => ({ action, index })).reverse().find(({ action }) => {
+        if (action.type !== 'text') return false
+        const bounds = getTextBounds(action)
+        return point.x >= bounds.x - 5 && point.x <= bounds.x + bounds.width + 5 && point.y >= bounds.y - 5 && point.y <= bounds.y + bounds.height + 5
+      })?.index
+      if (hitIndex !== undefined) { setSelectedTextIndex(hitIndex); return }
+      if (!textPlacementPending) { setSelectedTextIndex(null); return }
+      setSelectedTextIndex(null)
       if (!text.trim()) { message.info('先输入要添加的文字'); return }
-      commit({ type: 'text', text: text.trim(), x: point.x, y: point.y, size: textSize, color }); return
+      commit({ type: 'text', text: text.trim(), x: point.x, y: point.y, size: textSize, color }); setSelectedTextIndex(Math.min(actions.length, 39)); setTextPlacementPending(false); return
     }
     const action: ImageEditAction = tool === 'brush' ? { type: 'brush', points: [point], size: brushSize, color } : { type: 'mosaic', points: [point], size: mosaicSize }
     activeActionRef.current = action
@@ -194,6 +227,31 @@ export default function ImageEditor({ open, path, fileName, outputFormat, initia
     cropDragRef.current = null
     if (activeActionRef.current) { commit(activeActionRef.current); activeActionRef.current = null }
   }
+  const beginTextTransform = (event: PointerEvent<HTMLDivElement>, mode: TextDrag['mode'], handle?: TextDrag['handle']) => {
+    if (selectedTextIndex === null || !selectedText) return
+    event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId)
+    textDragRef.current = { mode, start: pointFromClient(event.clientX, event.clientY), original: selectedText, handle }
+  }
+  const moveTextTransform = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = textDragRef.current
+    if (!drag || selectedTextIndex === null) return
+    if (!drag.historyRecorded) { setPastActions(current => [...current.slice(-39), actions]); setRedoActions([]); drag.historyRecorded = true }
+    const point = pointFromClient(event.clientX, event.clientY), original = drag.original
+    if (drag.mode === 'move') {
+      const dx = point.x - drag.start.x, dy = point.y - drag.start.y
+      updateTextAction(selectedTextIndex, { x: Math.max(0, Math.min(canvasRef.current!.width - getTextBounds(original).width, original.x + dx)), y: Math.max(0, Math.min(canvasRef.current!.height - getTextBounds(original).height, original.y + dy)) }, false)
+    } else {
+      const horizontalSign = drag.handle?.includes('w') ? -1 : 1
+      const verticalSign = drag.handle?.includes('n') ? -1 : 1
+      const deltaX = (point.x - drag.start.x) * horizontalSign
+      const deltaY = (point.y - drag.start.y) * verticalSign
+      const bounds = getTextBounds(original)
+      const scaleX = bounds.width > 0 ? (bounds.width + deltaX) / bounds.width : 1
+      const scaleY = (original.size * 1.25 + deltaY) / (original.size * 1.25)
+      const nextSize = Math.max(8, Math.min(400, Math.round(original.size * Math.max(0.1, (scaleX + scaleY) / 2))))
+      updateTextAction(selectedTextIndex, { size: nextSize }, false)
+    }
+  }
   const applyCrop = () => {
     if (!cropRect || cropRect.width < 1 || cropRect.height < 1) return
     commit({ type: 'crop', x: Math.round(cropRect.x), y: Math.round(cropRect.y), width: Math.max(1, Math.round(cropRect.width)), height: Math.max(1, Math.round(cropRect.height)) })
@@ -201,14 +259,18 @@ export default function ImageEditor({ open, path, fileName, outputFormat, initia
   }
   const clearCrop = () => { cropDragRef.current = null; setCropRect(null) }
   const undo = () => {
-    if (!actions.length) return
-    setRedoActions(current => [actions[actions.length - 1], ...current])
-    setActions(actions.slice(0, -1))
+    if (!pastActions.length) return
+    setRedoActions(current => [actions, ...current])
+    setActions(pastActions[pastActions.length - 1])
+    setPastActions(pastActions.slice(0, -1))
+    setSelectedTextIndex(null)
   }
   const redo = () => {
     if (!redoActions.length) return
-    setActions(current => [...current, redoActions[0]])
+    setPastActions(current => [...current.slice(-39), actions])
+    setActions(redoActions[0])
     setRedoActions(redoActions.slice(1))
+    setSelectedTextIndex(null)
   }
   const confirmEdits = async () => {
     const canvas = canvasRef.current
@@ -216,7 +278,7 @@ export default function ImageEditor({ open, path, fileName, outputFormat, initia
     setSaving(true)
     try {
       const finalActions = rotationAngle ? [...actions.slice(-39), { type: 'rotate' as const, degrees: rotationAngle }] : actions
-      if (rotationAngle) { setActions(finalActions); setRedoActions([]); setRotationAngle(0); renderActions(finalActions) }
+      if (rotationAngle) { setPastActions(current => [...current.slice(-39), actions]); setActions(finalActions); setRedoActions([]); setRotationAngle(0); renderActions(finalActions) }
       const format = outputFormat.toUpperCase(), mime = format === 'JPG' || format === 'JPEG' ? 'image/jpeg' : format === 'WEBP' ? 'image/webp' : 'image/png'
       const outputCanvas = document.createElement('canvas'); outputCanvas.width = canvas.width; outputCanvas.height = canvas.height
       const context = outputCanvas.getContext('2d')!
@@ -239,19 +301,21 @@ export default function ImageEditor({ open, path, fileName, outputFormat, initia
   const rotateBy = (degrees: number) => { commit({ type: 'rotate', degrees }); setRotationAngle(0) }
   const previewSize = (value: number, maximum: number) => Math.max(3, Math.round(value / maximum * 46))
   const overlayStyle = cropRect && canvasSize[0] ? { left: `${cropRect.x / canvasSize[0] * 100}%`, top: `${cropRect.y / canvasSize[1] * 100}%`, width: `${cropRect.width / canvasSize[0] * 100}%`, height: `${cropRect.height / canvasSize[1] * 100}%` } : undefined
+  const selectedTextBounds = selectedText ? getTextBounds(selectedText) : null
+  const textOverlayStyle = selectedTextBounds && canvasSize[0] ? { left: `${selectedTextBounds.x / canvasSize[0] * 100}%`, top: `${selectedTextBounds.y / canvasSize[1] * 100}%`, width: `${selectedTextBounds.width / canvasSize[0] * 100}%`, height: `${selectedTextBounds.height / canvasSize[1] * 100}%` } : undefined
 
-  return <Modal title={`图片编辑 · ${fileName}`} open={open} onCancel={onClose} width={1080} centered destroyOnClose footer={<div className="image-editor-footer"><span>{canvasSize[0]} × {canvasSize[1]} px · {actions.length} 个操作</span><div><Tooltip title="撤销"><Button aria-label="撤销" icon={<UndoOutlined/>} disabled={!actions.length} onClick={undo}/></Tooltip><Tooltip title="重做"><Button aria-label="重做" icon={<RedoOutlined/>} disabled={!redoActions.length} onClick={redo}/></Tooltip><Button onClick={onClose}>取消</Button><Button type="primary" loading={saving} onClick={() => void confirmEdits()}>确定</Button></div></div>}>
+  return <Modal title={`图片编辑 · ${fileName}`} open={open} onCancel={onClose} width={1080} centered destroyOnClose footer={<div className="image-editor-footer"><span>{canvasSize[0]} × {canvasSize[1]} px · {actions.length} 个图层 · {pastActions.length} 个可撤销操作</span><div><Tooltip title="撤销"><Button aria-label="撤销" icon={<UndoOutlined/>} disabled={!pastActions.length} onClick={undo}/></Tooltip><Tooltip title="重做"><Button aria-label="重做" icon={<RedoOutlined/>} disabled={!redoActions.length} onClick={redo}/></Tooltip><Button onClick={onClose}>取消</Button><Button type="primary" loading={saving} onClick={() => void confirmEdits()}>确定</Button></div></div>}>
     <div className="image-editor">
       <div className="image-editor-toolbar">
-        <Select value={tool} onChange={value => { setTool(value); clearCrop(); if (value !== 'rotate') setRotationAngle(0) }} options={[{value:'crop',label:'裁剪'},{value:'rotate',label:'旋转'},{value:'text',label:'文字'},{value:'brush',label:'画笔'},{value:'mosaic',label:'马赛克'}]}/>
+        <Select value={tool} onChange={value => { setTool(value); clearCrop(); if (value !== 'rotate') setRotationAngle(0); if (value !== 'text') setSelectedTextIndex(null) }} options={[{value:'crop',label:'裁剪'},{value:'rotate',label:'旋转'},{value:'text',label:'文字'},{value:'brush',label:'画笔'},{value:'mosaic',label:'马赛克'}]}/>
         {tool === 'rotate' && <><Tooltip title="向左旋转 90°"><Button icon={<RotateLeftOutlined/>} onClick={() => rotateBy(-90)}/></Tooltip><Tooltip title="向右旋转 90°"><Button icon={<RotateRightOutlined/>} onClick={() => rotateBy(90)}/></Tooltip><div className="image-editor-rotation"><span className="image-editor-rotation-label">旋转 {rotationAngle}°</span><input aria-label="旋转角度" type="range" min={-360} max={360} value={rotationAngle} onChange={event => setRotationAngle(Number(event.target.value))}/><InputNumber aria-label="旋转角度数值" min={-360} max={360} step={1} addonAfter="°" value={rotationAngle} onChange={value => setRotationAngle(Number(value || 0))}/><Button onClick={applyRotation} disabled={!rotationAngle}>应用</Button></div></>}
-        {tool === 'text' && <><Input value={text} onChange={event => setText(event.target.value)} placeholder="输入文字"/><InputNumber min={8} max={400} addonAfter="px" value={textSize} onChange={value => setTextSize(Number(value || 48))}/><input aria-label="文字颜色" type="color" value={color} onChange={event => setColor(event.target.value)}/></>}
+        {tool === 'text' && <><div className="image-editor-text-entry"><Input value={selectedText?.text ?? text} onChange={event => { if (selectedTextIndex !== null && selectedText) updateTextAction(selectedTextIndex, { text: event.target.value }); else { setText(event.target.value); setTextPlacementPending(Boolean(event.target.value.trim())) } }} placeholder="输入文字后点击图片放置"/><Tooltip title="确认当前文字并清空输入；需要添加新文字时重新输入"><Button aria-label="确认文字" icon={<CheckOutlined/>} disabled={!text.trim() && !selectedText} onClick={() => { setText(''); setTextPlacementPending(false); setSelectedTextIndex(null) }}/></Tooltip></div><InputNumber min={8} max={400} addonAfter="px" value={selectedText?.size ?? textSize} onChange={value => selectedTextIndex !== null && selectedText ? updateTextAction(selectedTextIndex, { size: Number(value || 48) }) : setTextSize(Number(value || 48))}/><input aria-label="文字颜色" type="color" value={selectedText?.color ?? color} onChange={event => selectedTextIndex !== null && selectedText ? updateTextAction(selectedTextIndex, { color: event.target.value }) : setColor(event.target.value)}/></>}
         {tool === 'brush' && <><label className="image-editor-size-control">粗细<input aria-label="画笔粗细滑杆" type="range" min={1} max={100} value={brushSize} onChange={event => setBrushSize(Number(event.target.value))}/></label><InputNumber aria-label="画笔粗细数值" min={1} max={100} step={1} addonAfter="px" value={brushSize} onChange={value => setBrushSize(Number(value || 1))}/><div className="image-editor-size-preview" aria-label={`画笔预览，实际粗细 ${brushSize} 像素，按一半比例显示`} title={`实际 ${brushSize}px · 预览 ${brushSize / 2}px`}><span className="brush-size-sample" style={{ height: `${brushSize * 0.5}px`, backgroundColor: color }}/></div><input aria-label="画笔颜色" type="color" value={color} onChange={event => setColor(event.target.value)}/></>}
         {tool === 'mosaic' && <><label className="image-editor-size-control">颗粒 {mosaicSize}px<input aria-label="马赛克颗粒大小" type="range" min={4} max={120} value={mosaicSize} onChange={event => setMosaicSize(Number(event.target.value))}/></label><div className="image-editor-size-preview mosaic-size-preview" aria-label={`马赛克预览，颗粒 ${mosaicSize} 像素`} title={`马赛克颗粒 ${mosaicSize}px`}><span style={{ backgroundSize: `${previewSize(mosaicSize, 120)}px ${previewSize(mosaicSize, 120)}px` }}/></div></>}
         {tool === 'crop' && <><Button type="primary" disabled={!cropRect || cropRect.width < 1 || cropRect.height < 1} onClick={applyCrop}>应用裁剪</Button><Button disabled={!cropRect} onClick={clearCrop}>清除框</Button></>}
-        <span className="image-editor-tool-hint">{tool === 'crop' ? '拖动画出新范围；拖动框可移动，拖动四角可缩放' : tool === 'rotate' ? '滑杆实时预览旋转；点击“应用”记录到操作历史' : tool === 'text' ? '输入文字后点击图片放置' : tool === 'brush' ? '在图片上拖动绘制' : '在图片上涂抹马赛克'}</span>
+        <span className="image-editor-tool-hint">{tool === 'crop' ? '拖动画出新范围；拖动框可移动，拖动四角可缩放' : tool === 'rotate' ? '滑杆实时预览旋转；点击“应用”记录到操作历史' : tool === 'text' ? (selectedText ? '已选中文字：可修改内容、颜色和字号；拖动文字移动，拖动四角缩放；点击确认结束编辑' : textPlacementPending ? '点击图片放置一次；放置后点击输入框旁的确认按钮结束并清空文字' : '输入文字后点击图片放置；要添加下一段文字，请先确认当前文字并重新输入') : tool === 'brush' ? '在图片上拖动绘制' : '在图片上涂抹马赛克'}</span>
       </div>
-      <div className="image-editor-stage"><div className="image-editor-canvas-wrap"><canvas ref={canvasRef} style={{ transform: rotationAngle ? `rotate(${rotationAngle}deg)` : undefined }} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}/>{tool === 'crop' && cropRect && <div className="image-editor-crop-overlay" style={overlayStyle}>{(['nw','ne','sw','se'] as const).map(handle => <i key={handle} className={`image-editor-crop-handle ${handle}`}/>)}</div>}</div></div>
+      <div className="image-editor-stage"><div className="image-editor-canvas-wrap"><canvas ref={canvasRef} style={{ transform: rotationAngle ? `rotate(${rotationAngle}deg)` : undefined }} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}/>{tool === 'crop' && cropRect && <div className="image-editor-crop-overlay" style={overlayStyle}>{(['nw','ne','sw','se'] as const).map(handle => <i key={handle} className={`image-editor-crop-handle ${handle}`}/>)}</div>}{tool === 'text' && selectedText && textOverlayStyle && <div className="image-editor-text-selection" style={textOverlayStyle} onPointerDown={event => beginTextTransform(event, 'move')} onPointerMove={moveTextTransform} onPointerUp={event => { textDragRef.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId) }} onPointerCancel={() => { textDragRef.current = null }}>{(['nw','ne','sw','se'] as const).map(handle => <i key={handle} className={`image-editor-text-handle ${handle}`} onPointerDown={event => beginTextTransform(event, 'resize', handle)}/>)}</div>}</div></div>
     </div>
   </Modal>
 }
