@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, shell, protocol } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, shell, protocol, desktopCapturer, clipboard, nativeImage } = require('electron')
 const fs = require('node:fs/promises')
 const { createReadStream } = require('node:fs')
 const { Readable } = require('node:stream')
@@ -21,7 +21,7 @@ protocol.handle('media-preview', request => {
   const filePath = preview.path
   return fs.stat(filePath).then(stat => {
     const range = request.headers.get('range')
-    const mime = ({ mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac', ogg: 'audio/ogg', mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska', avi: 'video/x-msvideo', webm: 'video/webm' })[path.extname(filePath).slice(1).toLowerCase()] || 'application/octet-stream'
+    const mime = ({ mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac', ogg: 'audio/ogg', mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska', avi: 'video/x-msvideo', webm: 'video/webm', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff' })[path.extname(filePath).slice(1).toLowerCase()] || 'application/octet-stream'
     const headers = { 'Accept-Ranges': 'bytes', 'Content-Type': mime, 'Access-Control-Allow-Origin': '*' }
     if (range) {
       const match = /^bytes=(\d*)-(\d*)$/.exec(range)
@@ -57,6 +57,48 @@ ipcMain.handle('files:select', async (_event, extensions) => {
 ipcMain.handle('directory:select', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
   return result.canceled ? null : result.filePaths[0]
+})
+ipcMain.handle('capture:sources', async () => {
+  const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] })
+  return { sources: sources.map(source => ({ id: source.id, name: source.name })), supportsSystemAudio: process.platform === 'win32' }
+})
+ipcMain.handle('capture:clipboard', (_event, bytes) => {
+  if (!Array.isArray(bytes)) throw new Error('截图数据无效')
+  clipboard.writeImage(nativeImage.createFromBuffer(Buffer.from(bytes)))
+  return true
+})
+ipcMain.handle('capture:record-output', async (_event, { name, path: outputPath, operation }) => {
+  if (typeof outputPath !== 'string' || !path.isAbsolute(outputPath)) throw new Error('截图或录屏路径无效')
+  return taskQueue.recordExternalOutput(String(name || path.basename(outputPath)), outputPath, operation === 'recording' ? 'system.recording' : 'system.screenshot')
+})
+ipcMain.handle('capture:save-recording', async (_event, { bytes, name, directory, format, mime }) => {
+  if (!Array.isArray(bytes) || !directory || !path.isAbsolute(directory)) throw new Error('录屏保存参数无效')
+  await fs.mkdir(directory, { recursive: true })
+  const ext = String(format).toLowerCase() === 'mp4' ? 'mp4' : 'webm'
+  const stem = path.basename(String(name || 'Screen Recording')).replace(/[<>:"|?*\x00-\x1f]/g, '_').replace(/[. ]+$/g, '') || 'Screen Recording'
+  let output = path.join(directory, `${stem}.${ext}`)
+  for (let index = 2; await fs.access(output).then(() => true).catch(() => false); index += 1) output = path.join(directory, `${stem} (${index}).${ext}`)
+  const sourceExt = String(mime || '').includes('mp4') ? 'mp4' : 'webm'
+  const tempInput = path.join(app.getPath('temp'), `fcs-recording-${crypto.randomUUID()}.${sourceExt}`)
+  await fs.writeFile(tempInput, Buffer.from(bytes))
+  let succeeded = false
+  try {
+    if (ext === 'mp4' && sourceExt === 'webm') await new Promise((resolve, reject) => {
+      const child = spawn(getFFmpegPath(), ['-y', '-hide_banner', '-i', tempInput, '-c:v', 'libx264', '-preset', 'medium', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', output], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
+      let stderr = ''; child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-100000) })
+      child.on('error', reject); child.on('close', code => code === 0 ? resolve() : reject(new Error(stderr || `录屏转码失败，进程退出代码 ${code}`)))
+    })
+    else if (ext === sourceExt) await fs.copyFile(tempInput, output)
+    else throw new Error(`暂不支持从 ${sourceExt.toUpperCase()} 录制容器直接保存为 ${ext.toUpperCase()}`)
+    succeeded = true
+  } catch (error) { await fs.rm(output, { force: true }); throw new Error(`${error.message}\n临时录制文件保留在：${tempInput}`) }
+  finally { if (succeeded) await fs.rm(tempInput, { force: true }) }
+  return output
+})
+ipcMain.handle('capture:open-settings', async () => {
+  if (process.platform === 'darwin') await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
+  else if (process.platform === 'win32') await shell.openExternal('ms-settings:privacy-broadfilesystemaccess')
+  return true
 })
 ipcMain.handle('folder:select', async (_event, extensions) => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
@@ -246,5 +288,22 @@ ipcMain.handle('files:save', async (_event, { name, data, directory, sourcePath 
   await fs.writeFile(path.join(targetDirectory, name), Buffer.from(data))
   return true
 })
-app.whenReady().then(() => { registerMediaPreviewHandler(); taskQueue = new TaskQueue(); createWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() }) })
+ipcMain.handle('image-editor:save', async (_event, { name, data, directory, sourcePath }) => {
+  const targetDirectory = directory || (sourcePath ? path.dirname(sourcePath) : null)
+  if (!targetDirectory) throw new Error('没有可用的保存目录')
+  await fs.mkdir(targetDirectory, { recursive: true })
+  const extension = path.extname(name), stem = path.basename(name, extension)
+  let output = path.join(targetDirectory, name), index = 2
+  while (true) {
+    try { await fs.access(output); output = path.join(targetDirectory, `${stem} (${index++})${extension}`) }
+    catch { break }
+  }
+  await fs.writeFile(output, Buffer.from(data))
+  await taskQueue.recordExternalOutput(path.basename(output), output, 'image.edit', Date.now(), sourcePath || output, false)
+  return output
+})
+app.whenReady().then(() => {
+  registerMediaPreviewHandler(); taskQueue = new TaskQueue(); createWindow()
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
+})
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })

@@ -8,4 +8,5 @@ conversion-engines/poppler/dist/
 __pycache__/
 *.pyc
 需求文档.md
+需求文档v1-4.md
 .DS_Store

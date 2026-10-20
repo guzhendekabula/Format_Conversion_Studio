@@ -122,7 +122,7 @@ function audioCodecArgs(extension) {
 }
 
 function videoCodecArgs(extension, hasAudio) {
-  if (extension === 'webm') return ['-c:v', 'libvpx-vp9', '-crf', '32', '-b:v', '0', ...(hasAudio ? ['-c:a', 'libopus', '-b:a', '128k'] : [])]
+  if (extension === 'webm') return ['-c:v', 'libvpx-vp9', '-crf', '26', '-b:v', '0', ...(hasAudio ? ['-c:a', 'libopus', '-b:a', '128k'] : [])]
   if (extension === 'avi') return ['-c:v', 'mpeg4', '-q:v', '4', ...(hasAudio ? ['-c:a', 'libmp3lame', '-q:a', '3'] : [])]
   if (['mp4', 'mov', 'mkv'].includes(extension)) return ['-c:v', 'libx264', '-preset', 'medium', '-crf', '20', ...(hasAudio ? ['-c:a', 'aac', '-b:a', '192k'] : [])]
   throw new Error(`暂不支持裁剪 ${extension.toUpperCase()} 视频`)
@@ -158,6 +158,138 @@ async function runMediaTrim(request, progress, isVideo) {
     else if (!isVideo) args.push('-map', '[outa]')
     args.push(...(isVideo ? videoCodecArgs(extension, media.hasAudio) : audioCodecArgs(extension)), '-progress', 'pipe:1', '-nostats', output)
     await runProcess(ffmpegPath(), args, null, progress, filteredDurationMs)
+  } catch (error) {
+    await fs.rm(output, { force: true })
+    throw error
+  }
+  progress?.(100)
+  return { outputs: [output] }
+}
+
+async function runVideoCrop(request, progress) {
+  const input = request.path, options = request.options || {}
+  let details = ''
+  try { await runProcess(ffmpegPath(), ['-hide_banner', '-i', input], null, null) } catch (error) { details = error.message || '' }
+  const duration = parseDuration(details)
+  const match = details.match(/Video:.*?(\d{2,5})x(\d{2,5})/i)
+  if (!duration || !match) throw new Error('无法读取视频尺寸或时长')
+  const sourceWidth = Number(match[1]), sourceHeight = Number(match[2])
+  const requested = options.cropByPath?.[input]
+  if (!requested) throw new Error('请先为该视频设置画面裁剪区域')
+  const x = Math.max(0, Math.min(sourceWidth - 2, Math.round(Number(requested.x) || 0)))
+  const y = Math.max(0, Math.min(sourceHeight - 2, Math.round(Number(requested.y) || 0)))
+  const width = Math.max(2, Math.min(sourceWidth - x, Math.round(Number(requested.width) || sourceWidth)) & ~1)
+  const height = Math.max(2, Math.min(sourceHeight - y, Math.round(Number(requested.height) || sourceHeight)) & ~1)
+  const evenX = x > sourceWidth - width ? Math.max(0, sourceWidth - width) : x
+  const evenY = y > sourceHeight - height ? Math.max(0, sourceHeight - height) : y
+  const hasAudio = /Audio:/.test(details)
+  const dir = request.outputDir || path.dirname(input)
+  await fs.mkdir(dir, { recursive: true })
+  const nameOptions = options.outputNamesByPath?.[input] ? options : { ...options, outputName: `${path.basename(input, path.extname(input))}_crop` }
+  const output = await uniqueOutput(dir, outputStem(input, nameOptions, 'mp4'), '.mp4')
+  // The UI quality is 1–100; FFmpeg CRF is inverse (lower is sharper).
+  // Passing the UI value straight through used to clamp 85 to CRF 51, making
+  // the spatially cropped output extremely blurry.
+  const quality = Math.max(10, Math.min(51, Math.round(10 + (100 - Number(options.quality ?? 78)) * 0.4)))
+  const args = ['-y', '-hide_banner', '-i', input, '-vf', `crop=${width}:${height}:${evenX}:${evenY}`, '-c:v', 'libx264', '-preset', 'medium', '-crf', String(quality), '-pix_fmt', 'yuv420p']
+  if (hasAudio) args.push('-c:a', 'aac', '-b:a', '192k')
+  args.push('-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', output)
+  try { await runProcess(ffmpegPath(), args, null, progress, duration) }
+  catch (error) { await fs.rm(output, { force: true }); throw error }
+  progress?.(100)
+  return { outputs: [output] }
+}
+
+async function probeForConcat(filePath) {
+  let text = ''
+  try { await runProcess(ffmpegPath(), ['-hide_banner', '-i', filePath], null, null) }
+  catch (error) { text = error.message || '' }
+  const durationMs = parseDuration(text)
+  if (!durationMs) throw new Error(`无法读取媒体信息：${path.basename(filePath)}`)
+  const videoLine = text.split(/\r?\n/).find(line => /Video:/.test(line)) || ''
+  const audioLine = text.split(/\r?\n/).find(line => /Audio:/.test(line)) || ''
+  if (!videoLine && !audioLine) throw new Error(`文件中没有可拼接的音视频流：${path.basename(filePath)}`)
+  const video = videoLine.match(/Video:\s*([^,]+),\s*([^,]+).*?(\d{2,5})x(\d{2,5}).*?(\d+(?:\.\d+)?)\s*fps/i)
+  const audio = audioLine.match(/Audio:\s*([^,]+),\s*(\d+)\s*Hz,\s*([^,]+)/i)
+  return {
+    durationMs, hasVideo: Boolean(videoLine), hasAudio: Boolean(audioLine),
+    video: video ? { codec: video[1].trim(), pixelFormat: video[2].trim(), width: Number(video[3]), height: Number(video[4]), fps: Number(video[5]), streamInfo: normalizeStreamInfo(videoLine) } : null,
+    audio: audio ? { codec: audio[1].trim(), sampleRate: Number(audio[2]), channels: audio[3].trim(), streamInfo: normalizeStreamInfo(audioLine) } : null,
+  }
+}
+
+function normalizeStreamInfo(line) {
+  return line.replace(/^\s*Stream #\d+:\d+(?:\([^)]*\))?:\s*/, '').replace(/,\s*\d+(?:\.\d+)?\s*(?:k|M)?b\/s\b/ig, '').trim()
+}
+
+function sameStream(a, b) { return JSON.stringify(a) === JSON.stringify(b) }
+
+async function runMediaConcat(request, progress, isVideo) {
+  const inputs = request.paths || []
+  if (inputs.length < 2) throw new Error('请至少选择两个文件进行拼接')
+  const options = request.options || {}
+  const ext = isVideo ? 'mp4' : String(options.format || 'mp3').toLowerCase()
+  const dir = request.outputDir || path.dirname(inputs[0])
+  await fs.mkdir(dir, { recursive: true })
+  const stemRaw = String(options.outputName || 'merged').trim()
+  const stem = path.basename(stemRaw).replace(/[<>:"|?*\x00-\x1f\\/]/g, '_').replace(/[. ]+$/g, '') || 'merged'
+  const output = await uniqueOutput(dir, stem, `.${ext}`)
+  const media = []
+  try {
+    for (let index = 0; index < inputs.length; index += 1) {
+      media.push(await probeForConcat(inputs[index]))
+      progress?.(Math.min(15, Math.round((index + 1) * 15 / inputs.length)), `读取媒体信息 ${index + 1}/${inputs.length}`)
+    }
+    if (isVideo) {
+      if (media.some(item => !item.hasVideo)) throw new Error('视频拼接列表中包含没有视频画面的文件')
+      if (media.some(item => !item.video)) throw new Error('无法识别其中一个视频的编码参数')
+      const baseIndex = Math.max(0, Math.min(inputs.length - 1, Number(options.videoSizeBaseIndex || 0)))
+      const base = media[baseIndex].video
+      const fps = Number(options.concatFps || base?.fps || 30)
+      const quality = Number(options.concatQuality || 23)
+      const canCopy = media.every(item => item.hasVideo && sameStream(item.video, base) && item.hasAudio === media[0].hasAudio && (!item.hasAudio || sameStream(item.audio, media[0].audio))) && Math.abs(fps - (base?.fps || fps)) < 0.001
+      if (canCopy) {
+        const listPath = path.join(app.getPath('temp'), `fcs-concat-${require('node:crypto').randomUUID()}.txt`)
+        const quote = value => `'${path.resolve(value).replace(/\\/g, '/').replace(/'/g, "'\\''")}'`
+        try {
+          await fs.writeFile(listPath, inputs.map(file => `file ${quote(file)}`).join('\n'), 'utf8')
+          const duration = media.reduce((sum, item) => sum + item.durationMs, 0)
+          await runProcess(ffmpegPath(), ['-y', '-hide_banner', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', output], null, progress, duration)
+          progress?.(100, '已无损拼接（未重新编码）')
+          return { outputs: [output], message: 'stream-copy' }
+        } catch {
+          await fs.rm(output, { force: true })
+          progress?.(18, '直接拼接不可用，正在重新编码以确保兼容性')
+          // A conservative fallback handles container or timestamp incompatibilities.
+        } finally { await fs.rm(listPath, { force: true }) }
+      }
+      if (!canCopy) progress?.(18, '输入编码或目标尺寸不兼容，正在统一编码')
+      const args = ['-y', '-hide_banner']
+      inputs.forEach(file => args.push('-i', file))
+      const filters = []
+      const concatInputs = []
+      inputs.forEach((_, index) => {
+        filters.push(`[${index}:v:0]scale=${base.width}:${base.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${base.width}:${base.height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=${fps},setsar=1,setpts=PTS-STARTPTS[v${index}]`)
+        if (media[index].hasAudio) filters.push(`[${index}:a:0]aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a${index}]`)
+        else filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${(media[index].durationMs / 1000).toFixed(3)},asetpts=PTS-STARTPTS[a${index}]`)
+        concatInputs.push(`[v${index}][a${index}]`)
+      })
+      filters.push(`${concatInputs.join('')}concat=n=${inputs.length}:v=1:a=1[outv][outa]`)
+      args.push('-filter_complex', filters.join(';'), '-map', '[outv]', '-map', '[outa]', '-c:v', 'libx264', '-preset', 'medium', '-crf', String(Math.max(10, Math.min(51, quality))), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', output)
+      await runProcess(ffmpegPath(), args, null, progress, media.reduce((sum, item) => sum + item.durationMs, 0))
+    } else {
+      const channels = options.channels === 'mono' ? 'mono' : 'stereo'
+      const sampleRate = Number(options.sampleRate || 44100)
+      const args = ['-y', '-hide_banner']
+      inputs.forEach(file => args.push('-i', file))
+      const filters = inputs.map((_, index) => `[${index}:a:0]aresample=${sampleRate},aformat=sample_rates=${sampleRate}:channel_layouts=${channels},asetpts=PTS-STARTPTS[a${index}]`)
+      filters.push(`${inputs.map((_, index) => `[a${index}]`).join('')}concat=n=${inputs.length}:v=0:a=1[outa]`)
+      args.push('-filter_complex', filters.join(';'), '-map', '[outa]')
+      if (ext === 'wav') args.push('-c:a', 'pcm_s16le')
+      else args.push('-c:a', 'libmp3lame', '-b:a', `${Number(options.bitrate || 192)}k`)
+      args.push('-progress', 'pipe:1', '-nostats', output)
+      await runProcess(ffmpegPath(), args, null, progress, media.reduce((sum, item) => sum + item.durationMs, 0))
+    }
   } catch (error) {
     await fs.rm(output, { force: true })
     throw error
@@ -241,6 +373,9 @@ async function runPython(request, progress) {
 }
 
 async function runEngine(request, progress) {
+  if (request.operation === 'media.video-concat') return runMediaConcat(request, progress, true)
+  if (request.operation === 'media.audio-concat') return runMediaConcat(request, progress, false)
+  if (request.operation === 'media.video-crop') return runVideoCrop(request, progress)
   if (request.operation === 'media.audio-trim') return runMediaTrim(request, progress, false)
   if (request.operation === 'media.video-trim') return runMediaTrim(request, progress, true)
   return request.operation.startsWith('media.') ? runFfmpeg(request, progress) : runPython(request, progress)

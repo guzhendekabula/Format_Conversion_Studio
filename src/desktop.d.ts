@@ -7,6 +7,11 @@ declare global {
     desktop?: {
       selectFiles: (extensions: string) => Promise<{ path: string; name: string; size: number }[]>
       selectDirectory: () => Promise<string | null>
+      getCaptureSources: () => Promise<{ sources: { id: string; name: string }[]; supportsSystemAudio: boolean }>
+      copyScreenshot: (bytes: number[]) => Promise<boolean>
+      recordCaptureOutput: (payload: { name: string; path: string; operation: 'screenshot' | 'recording' }) => Promise<HistoryEntry>
+      saveRecording: (payload: { bytes: number[]; mime: string; name: string; directory: string; format: 'MP4' | 'WEBM' }) => Promise<string>
+      openCaptureSettings: () => Promise<boolean>
       selectFolderFiles: (extensions: string) => Promise<{ path: string; name: string; size: number }[]>
       readFile: (path: string) => Promise<number[]>
       registerMediaPreview: (path: string) => Promise<string>
@@ -15,6 +20,7 @@ declare global {
       getMediaDuration: (path: string) => Promise<number>
       analyzeMedia: (path: string) => Promise<{ duration: number; hasAudio: boolean; peaks: number[] }>
       saveFile: (payload: { name: string; data: number[]; directory?: string; sourcePath?: string }) => Promise<boolean>
+      saveEditedImage: (payload: { name: string; data: number[]; directory?: string; sourcePath: string }) => Promise<string>
       getPathForFile: (file: File) => string
       hashText: (algorithm: string, text: string) => Promise<string>
       enqueueTask: (request: { operation: string; files: { path: string; name: string }[]; options?: Record<string, unknown>; outputDir?: string }) => Promise<{ id: string; position: number }>

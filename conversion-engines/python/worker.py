@@ -104,6 +104,15 @@ def image_convert(request):
     emit("progress", percent=5, message="读取图片")
     with Image.open(source) as original:
         image = original.copy()
+        if request["operation"] == "image.crop":
+            from PIL import ImageOps
+            image = ImageOps.exif_transpose(image)
+            crop = options.get("cropByPath", {}).get(str(source), {})
+            x = max(0, min(image.width - 1, int(crop.get("x", 0))))
+            y = max(0, min(image.height - 1, int(crop.get("y", 0))))
+            width = max(1, min(image.width - x, int(crop.get("width", image.width))))
+            height = max(1, min(image.height - y, int(crop.get("height", image.height))))
+            image = image.crop((x, y, x + width, y + height))
         if pil_format == "ICO":
             image = image.convert("RGBA")
             image.save(output, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])

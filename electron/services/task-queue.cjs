@@ -5,8 +5,8 @@ const { randomUUID } = require('node:crypto')
 const { runEngine } = require('./engine-runner.cjs')
 
 const ALLOWED = new Set([
-  'media.extract-audio', 'media.audio', 'media.audio-trim', 'media.video', 'media.video-trim', 'media.gif-to-video', 'media.video-to-gif',
-  'image.convert', 'image.compress', 'image.resize', 'image.ico',
+  'media.extract-audio', 'media.audio', 'media.audio-trim', 'media.video', 'media.video-trim', 'media.gif-to-video', 'media.video-to-gif', 'media.video-concat', 'media.audio-concat', 'media.video-crop',
+  'image.convert', 'image.compress', 'image.resize', 'image.ico', 'image.crop',
   'pdf.pdf-to-images', 'pdf.images-to-pdf',
   'excel.xlsx-to-csv', 'excel.csv-to-xlsx', 'excel.xlsx-to-json', 'excel.json-to-xlsx',
   'word.docx-to-txt', 'word.docx-to-md',
@@ -57,12 +57,22 @@ class TaskQueue {
     await this.writeHistory(entries)
   }
 
+  async recordExternalOutput(name, outputPath, operation, startedAt = Date.now(), inputPath = outputPath, notify = true) {
+    const file = { name, path: inputPath }
+    const job = { id: randomUUID(), operation, files: [file], outputDir: path.dirname(outputPath) }
+    const entry = this.makeEntry(job, [file], [outputPath], null, startedAt)
+    await this.addHistory(entry)
+    await this.log(entry)
+    if (notify) this.emit('jobs:done', { id: job.id, status: 'done', files: [entry], elapsedMs: entry.elapsedMs, completedAt: entry.completedAt })
+    return entry
+  }
+
   enqueue(input) {
     if (!input || !ALLOWED.has(input.operation)) throw new Error('未知转换任务')
     const files = Array.isArray(input.files) ? input.files.map(file => ({ ...file, path: typeof file.path === 'string' ? path.normalize(file.path) : file.path })) : []
     if (!files.length || files.some(file => !file.path)) throw new Error('任务文件路径无效')
     const options = { ...(input.options || {}) }
-    for (const key of ['outputNamesByPath', 'trimSegmentsByPath', 'targetBytesByPath']) {
+    for (const key of ['outputNamesByPath', 'trimSegmentsByPath', 'targetBytesByPath', 'cropByPath']) {
       if (options[key] && typeof options[key] === 'object') {
         options[key] = Object.fromEntries(Object.entries(options[key]).map(([filePath, value]) => [path.normalize(filePath), value]))
       }
@@ -91,7 +101,7 @@ class TaskQueue {
     this.emit('jobs:started', { id: job.id, operation: job.operation, fileCount: job.files.length })
     const outcomes = []
     try {
-      if (job.operation === 'pdf.images-to-pdf') {
+      if (['pdf.images-to-pdf', 'media.video-concat', 'media.audio-concat'].includes(job.operation)) {
         await this.runGrouped(job, outcomes)
       } else {
         for (let index = 0; index < job.files.length; index += 1) {
@@ -134,7 +144,7 @@ class TaskQueue {
     const paths = job.files.map(file => file.path)
     for (const file of job.files) this.emit('jobs:file', { id: job.id, path: file.path, name: file.name, status: 'running' })
     try {
-      const result = await runEngine({ operation: job.operation, paths, outputDir: job.outputDir, options: job.options }, (percent, message) => this.emit('jobs:progress', { id: job.id, percent: Math.max(0, Math.min(100, percent || 0)), current: job.files.length, total: job.files.length, message: message || '正在合并图片' }))
+      const result = await runEngine({ operation: job.operation, paths, outputDir: job.outputDir, options: job.options }, (percent, message) => this.emit('jobs:progress', { id: job.id, percent: Math.max(0, Math.min(100, percent || 0)), current: job.files.length, total: job.files.length, message: message || '正在合并文件' }))
       const entry = this.makeEntry(job, job.files, result.outputs || [], null, startedAt)
       outcomes.push(entry); await this.addHistory(entry); await this.log(entry)
       for (const file of job.files) this.emit('jobs:file', { id: job.id, path: file.path, name: file.name, status: 'done', outputs: result.outputs || [], elapsedMs: entry.elapsedMs })
@@ -147,7 +157,7 @@ class TaskQueue {
 
   makeEntry(job, files, outputs, error, startedAt) {
     return {
-      id: randomUUID(), jobId: job.id, name: files.length > 1 ? `${files.length} 张图片` : files[0]?.name || '转换任务',
+      id: randomUUID(), jobId: job.id, name: files.length > 1 ? job.operation === 'media.video-concat' ? `${files.length} 个视频拼接` : job.operation === 'media.audio-concat' ? `${files.length} 个音频拼接` : `${files.length} 张图片` : files[0]?.name || '转换任务',
       inputs: files.map(file => file.path), outputs, operation: job.operation,
       inputFormat: files.map(file => path.extname(file.name || file.path).slice(1).toUpperCase()).filter(Boolean).join(', '),
       outputFormat: outputs.map(file => path.extname(file).slice(1).toUpperCase()).filter(Boolean).join(', '),
