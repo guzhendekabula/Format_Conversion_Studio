@@ -227,7 +227,7 @@ export default function ImageEditor({ open, path, fileName, outputFormat, initia
     cropDragRef.current = null
     if (activeActionRef.current) { commit(activeActionRef.current); activeActionRef.current = null }
   }
-  const beginTextTransform = (event: PointerEvent<HTMLDivElement>, mode: TextDrag['mode'], handle?: TextDrag['handle']) => {
+  const beginTextTransform = (event: PointerEvent<HTMLElement>, mode: TextDrag['mode'], handle?: TextDrag['handle']) => {
     if (selectedTextIndex === null || !selectedText) return
     event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId)
     textDragRef.current = { mode, start: pointFromClient(event.clientX, event.clientY), original: selectedText, handle }

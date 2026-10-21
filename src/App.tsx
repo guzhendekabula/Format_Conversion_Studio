@@ -211,6 +211,7 @@ function App() {
       const videoMimeTypes: Record<string, string> = { mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska' }
       const audioMimeTypes: Record<string, string> = { mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac', ogg: 'audio/ogg' }
       const urls = await Promise.all(files.map(async file => {
+        if (!file.path) throw new Error(`无法读取文件路径：${file.name}`)
         const bytes = await window.desktop!.readFile!(file.path)
         const extension = file.name.split('.').pop()?.toLowerCase() || ''
         const type = isVideoConcat ? (videoMimeTypes[extension] || 'video/mp4') : (audioMimeTypes[extension] || 'audio/mpeg')
@@ -835,7 +836,7 @@ function App() {
     const stageBounds = stage.getBoundingClientRect()
     return { left, top, width, height, naturalWidth, naturalHeight, stageLeft: left - stageBounds.left, stageTop: top - stageBounds.top }
   }
-  const updateCropFromPointer = (event: PointerEvent<HTMLDivElement>) => {
+  const updateCropFromPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
     const frame = getCropContentFrame()
     if (!frame || !cropDragRef.current) return
     const { naturalWidth, naturalHeight } = frame
@@ -881,7 +882,7 @@ function App() {
     const next = { left: frame.stageLeft, top: frame.stageTop, width: frame.width, height: frame.height }
     setCropMediaFrame(previous => Math.abs(previous.left - next.left) < 0.5 && Math.abs(previous.top - next.top) < 0.5 && Math.abs(previous.width - next.width) < 0.5 && Math.abs(previous.height - next.height) < 0.5 ? previous : next)
   }
-  const beginCropSelection = (event: PointerEvent<HTMLDivElement>) => {
+  const beginCropSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault()
     const frame = getCropContentFrame()
     if (!frame) return
@@ -893,7 +894,7 @@ function App() {
     cropStageRef.current?.setPointerCapture(event.pointerId)
     setCropRect({ x: Math.round(x), y: Math.round(y), width: 1, height: 1 })
   }
-  const beginCropMove = (event: PointerEvent<HTMLDivElement>) => {
+  const beginCropMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || !cropRect.width || !cropRect.height) return
     const frame = getCropContentFrame()
     if (!frame) return
@@ -904,7 +905,7 @@ function App() {
     cropDragRef.current = { x, y, rect: cropRect, mode: 'move' }
     cropStageRef.current?.setPointerCapture(event.pointerId)
   }
-  const beginCropResize = (event: PointerEvent<HTMLSpanElement>, handle: string) => {
+  const beginCropResize = (event: ReactPointerEvent<HTMLSpanElement>, handle: string) => {
     if (event.button !== 0) return
     const frame = getCropContentFrame()
     if (!frame) return
