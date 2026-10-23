@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { Button, Dropdown, Input, InputNumber, message, Modal, Pagination, Select, Tooltip } from 'antd'
+import { Button, Dropdown, Input, InputNumber, message, Modal, Pagination, Select, Spin, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import { XMLBuilder, XMLParser, XMLValidator } from 'fast-xml-parser'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
@@ -74,6 +74,14 @@ function App() {
   const [concatNameCustomized, setConcatNameCustomized] = useState(false)
   const [concatPreviewUrls, setConcatPreviewUrls] = useState<string[]>([])
   const concatPreviewUrlsRef = useRef<string[]>([])
+  const [concatVideoPreviewUrl, setConcatVideoPreviewUrl] = useState('')
+  const concatVideoPreviewUrlRef = useRef('')
+  const [concatVideoSegmentStarts, setConcatVideoSegmentStarts] = useState<number[]>([])
+  const concatVideoRef = useRef<HTMLVideoElement>(null)
+  const concatVideoDurationsRef = useRef(new Map<string, number>())
+  const concatPreviewOrderRef = useRef<LocalFile[]>([])
+  const concatVideoPendingSeekRef = useRef(0)
+  const concatVideoRequestRef = useRef(0)
   const [concatPreviewIndex, setConcatPreviewIndex] = useState(0)
   const [concatPreviewOpen, setConcatPreviewOpen] = useState(false)
   const [concatPreviewLoading, setConcatPreviewLoading] = useState(false)
@@ -202,12 +210,61 @@ function App() {
     if (!isMediaConcat || concatNameCustomized) return
     setConcatOutputName(files.map(file => file.name.replace(/\.[^.]+$/, '')).join('+'))
   }, [isMediaConcat, concatNameCustomized, files])
-  useEffect(() => () => { concatPreviewUrlsRef.current.forEach(URL.revokeObjectURL) }, [])
+  useEffect(() => () => { concatPreviewUrlsRef.current.forEach(URL.revokeObjectURL); if (concatVideoPreviewUrlRef.current) void window.desktop?.releaseMediaPreview?.(concatVideoPreviewUrlRef.current) }, [])
+  const releaseConcatVideoPreview = () => {
+    const current = concatVideoPreviewUrlRef.current
+    concatVideoPreviewUrlRef.current = ''
+    setConcatVideoPreviewUrl('')
+    if (current) void window.desktop?.releaseMediaPreview?.(current)
+  }
+  const prepareVideoConcatPreview = async (orderedFiles: LocalFile[], selectedIndex = 0) => {
+    if (!window.desktop?.createVideoConcatPreview || !window.desktop?.registerMediaPreview || !window.desktop?.getMediaDuration) throw new Error('完整视频预览需要在桌面应用中使用')
+    const requestId = ++concatVideoRequestRef.current
+    const paths = orderedFiles.map(file => file.path)
+    if (paths.some(path => !path)) throw new Error('视频文件路径无效，请重新添加文件')
+    const filePaths = paths as string[]
+    const durations = await Promise.all(filePaths.map(async filePath => {
+      const cached = concatVideoDurationsRef.current.get(filePath)
+      if (cached !== undefined) return cached
+      const duration = await window.desktop!.getMediaDuration(filePath)
+      concatVideoDurationsRef.current.set(filePath, duration)
+      return duration
+    }))
+    const url = filePaths.length === 1
+      ? await window.desktop.registerMediaPreview(filePaths[0])
+      : await window.desktop.createVideoConcatPreview(filePaths, { videoSizeBaseIndex: concatBaseIndex, concatFps, concatQuality })
+    if (requestId !== concatVideoRequestRef.current) { void window.desktop.releaseMediaPreview(url); return }
+    const starts: number[] = []
+    durations.reduce((sum, duration, index) => { starts[index] = sum; return sum + duration }, 0)
+    concatVideoPendingSeekRef.current = Math.min(Math.max(0, selectedIndex), starts.length - 1)
+    setConcatVideoSegmentStarts(starts)
+    const previousUrl = concatVideoPreviewUrlRef.current
+    concatVideoPreviewUrlRef.current = url
+    setConcatVideoPreviewUrl(url)
+    if (previousUrl && previousUrl !== url) void window.desktop?.releaseMediaPreview?.(previousUrl)
+  }
+  const closeConcatPreview = () => {
+    setConcatPreviewOpen(false)
+    setConcatPreviewLoading(false)
+    concatVideoRequestRef.current += 1
+    releaseConcatVideoPreview()
+    concatPreviewUrlsRef.current.forEach(URL.revokeObjectURL)
+    concatPreviewUrlsRef.current = []
+    setConcatPreviewUrls([])
+  }
   const isVideoConcat = category === '音视频' && tool.title === '视频拼接'
   const openConcatPreview = async () => {
-    if (!files.length || !window.desktop?.readFile) return
+    if (!files.length) return
     setConcatPreviewLoading(true)
+    setConcatPreviewOpen(true)
     try {
+      if (isVideoConcat) {
+        concatPreviewOrderRef.current = [...files]
+        setConcatPreviewIndex(0)
+        await prepareVideoConcatPreview(files, 0)
+        return
+      }
+      if (!window.desktop?.readFile) return
       const videoMimeTypes: Record<string, string> = { mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska' }
       const audioMimeTypes: Record<string, string> = { mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac', ogg: 'audio/ogg' }
       const urls = await Promise.all(files.map(async file => {
@@ -221,7 +278,7 @@ function App() {
       concatPreviewUrlsRef.current = urls
       setConcatPreviewUrls(urls)
       setConcatPreviewIndex(0)
-      setConcatPreviewOpen(true)
+      concatPreviewOrderRef.current = [...files]
     } catch (error) { message.error(`无法预览拼接顺序：${(error as Error).message}`) }
     finally { setConcatPreviewLoading(false) }
   }
@@ -1075,7 +1132,11 @@ function App() {
     if (from === to || from < 0 || to < 0 || from >= files.length || to >= files.length) return
     concatPreviewFlipRef.current = new Map([...concatPreviewCardRefs.current].map(([id, node]) => { const rect = node.getBoundingClientRect(); return [id, { left: rect.left, top: rect.top }] }))
     moveFile(from, to)
-    setConcatPreviewUrls(current => { const next = [...current]; const [url] = next.splice(from, 1); next.splice(to, 0, url); return next })
+    const ordered = [...concatPreviewOrderRef.current]
+    const [moved] = ordered.splice(from, 1)
+    ordered.splice(to, 0, moved)
+    concatPreviewOrderRef.current = ordered
+    if (!isVideoConcat) setConcatPreviewUrls(current => { const next = [...current]; const [url] = next.splice(from, 1); next.splice(to, 0, url); return next })
     setConcatPreviewIndex(current => current === from ? to : from < current && current <= to ? current - 1 : from > current && current >= to ? current + 1 : current)
   }
   useLayoutEffect(() => {
@@ -1175,9 +1236,17 @@ function App() {
     }
   }
   const endConcatPreviewDrag = () => {
+    const moved = Boolean(concatPreviewDragRef.current?.moved)
+    const selectedId = files[concatPreviewIndex]?.id
     concatPreviewPointerCleanupRef.current?.()
     concatPreviewDragRef.current = null
     setConcatPreviewDrag(null)
+    if (moved && isVideoConcat && concatPreviewOpen) {
+      setConcatPreviewLoading(true)
+      const selectedIndex = Math.max(0, concatPreviewOrderRef.current.findIndex(file => file.id === selectedId))
+      setConcatPreviewIndex(selectedIndex)
+      void prepareVideoConcatPreview(concatPreviewOrderRef.current, selectedIndex).catch(error => message.error(`无法更新视频拼接预览：${(error as Error).message}`)).finally(() => setConcatPreviewLoading(false))
+    }
   }
   useLayoutEffect(() => {
     if (concatPreviewDrag && concatPreviewDragGhostRef.current) {
@@ -1511,8 +1580,8 @@ function App() {
     <Modal title="裁剪结果预览" rootClassName="crop-result-preview-modal" centered open={cropResultPreview !== null} onCancel={closeCropResultPreview} footer={<Button onClick={closeCropResultPreview}>关闭</Button>} width={900}>
       {cropResultPreview && <div className="crop-result-preview"><div className="crop-result-preview-window" style={{ width: cropResultPreview.crop.width * cropResultScale, height: cropResultPreview.crop.height * cropResultScale }}>{cropResultPreview.video ? <video ref={cropResultVideoRef} src={cropResultPreview.url} playsInline onLoadedMetadata={event => { const video = event.currentTarget; setCropResultPreviewSize([video.videoWidth, video.videoHeight]); setCropResultVideoDuration(video.duration || 0) }} onTimeUpdate={syncCropResultVideoProgress} onPlay={() => { setCropResultVideoPlaying(true); animateCropResultVideoProgress() }} onPause={() => { setCropResultVideoPlaying(false); syncCropResultVideoProgress(); if (cropResultVideoFrameRef.current !== null) cancelAnimationFrame(cropResultVideoFrameRef.current); cropResultVideoFrameRef.current = null }} onEnded={() => { setCropResultVideoPlaying(false); syncCropResultVideoProgress(); if (cropResultVideoFrameRef.current !== null) cancelAnimationFrame(cropResultVideoFrameRef.current); cropResultVideoFrameRef.current = null }} style={{ width: cropResultPreviewSize[0] * cropResultScale, height: cropResultPreviewSize[1] * cropResultScale, left: -cropResultPreview.crop.x * cropResultScale, top: -cropResultPreview.crop.y * cropResultScale }}/> : <img src={cropResultPreview.url} alt="裁剪结果" onLoad={event => setCropResultPreviewSize([event.currentTarget.naturalWidth, event.currentTarget.naturalHeight])} style={{ width: cropResultPreviewSize[0] * cropResultScale, height: cropResultPreviewSize[1] * cropResultScale, left: -cropResultPreview.crop.x * cropResultScale, top: -cropResultPreview.crop.y * cropResultScale }}/>}</div>{cropResultPreview.video && <div className="crop-result-video-controls"><Button type="text" aria-label={cropResultVideoPlaying ? '暂停' : '播放'} icon={cropResultVideoPlaying ? <PauseCircleOutlined/> : <PlayCircleOutlined/>} onClick={() => { const video = cropResultVideoRef.current; if (!video) return; if (video.paused) void video.play().catch(error => message.error((error as Error).message || '视频播放失败')); else video.pause() }}/><span ref={cropResultVideoElapsedRef} className="crop-result-video-time">0:00</span><input aria-label="视频预览进度" type="range" min={0} max={cropResultVideoDuration || 1} step={0.05} defaultValue={0} ref={cropResultVideoSeekRef} onChange={event => { const time = Number(event.target.value); if (cropResultVideoRef.current) cropResultVideoRef.current.currentTime = time; syncCropResultVideoProgress() }}/><span className="crop-result-video-time">{`${Math.floor(cropResultVideoDuration / 60)}:${String(Math.floor(cropResultVideoDuration % 60)).padStart(2, '0')}`}</span><Button type="text" aria-label={cropResultVideoMuted ? '取消静音' : '静音'} onClick={() => { const muted = !cropResultVideoMuted; setCropResultVideoMuted(muted); if (cropResultVideoRef.current) cropResultVideoRef.current.muted = muted }}>{cropResultVideoMuted ? '静音' : '音量'}</Button><input aria-label="视频预览音量" type="range" min={0} max={1} step={0.01} value={cropResultVideoVolume} onChange={event => { const volume = Number(event.target.value); setCropResultVideoVolume(volume); setCropResultVideoMuted(volume === 0); if (cropResultVideoRef.current) { cropResultVideoRef.current.volume = volume; cropResultVideoRef.current.muted = volume === 0 } }}/></div>}<span>{cropResultPreview.crop.width} × {cropResultPreview.crop.height} px · {files[cropResultPreview.index]?.name}</span></div>}
     </Modal>
-    <Modal title={isVideoConcat ? '视频拼接顺序预览' : '音频拼接顺序预览'} centered open={concatPreviewOpen} onCancel={() => setConcatPreviewOpen(false)} footer={<Button onClick={() => setConcatPreviewOpen(false)}>关闭</Button>} width={760} destroyOnClose>
-      {concatPreviewUrls.length > 0 && <div className="concat-preview-modal-content"><p>{isVideoConcat ? '按待处理列表的顺序依次播放；拖动下方视频卡片可调整顺序，或在文件列表中拖动文件名调整顺序。' : '按待处理列表的顺序依次播放；拖动下方音频卡片可调整顺序，或在文件列表中拖动文件名调整顺序。'}此处用于检查顺序，最终输出仍使用下方设置的编码参数。</p>{isVideoConcat ? <video key={concatPreviewIndex} src={concatPreviewUrls[concatPreviewIndex]} controls autoPlay playsInline onEnded={() => setConcatPreviewIndex(index => Math.min(index + 1, concatPreviewUrls.length - 1))}/> : <audio key={concatPreviewUrls[concatPreviewIndex]} src={concatPreviewUrls[concatPreviewIndex]} controls autoPlay onEnded={() => setConcatPreviewIndex(index => Math.min(index + 1, concatPreviewUrls.length - 1))}/>}<div className="concat-preview-current">{concatPreviewIndex + 1} / {concatPreviewUrls.length} · {files[concatPreviewIndex]?.name}</div><div className="concat-preview-list" role="list" aria-label="拼接顺序；拖动可调整">{files.map((file, index) => <Tooltip key={file.id} title={file.name}><button ref={node => { if (node) concatPreviewCardRefs.current.set(file.id, node); else concatPreviewCardRefs.current.delete(file.id) }} role="listitem" data-concat-index={index} data-concat-id={file.id} className={`concat-preview-card${index === concatPreviewIndex ? ' active' : ''}${concatPreviewDrag === file.id ? ' dragging' : ''}`} title={file.name} onPointerDown={event => startConcatPreviewDrag(event, file.id, index)} onClick={() => { if (suppressConcatPreviewClickRef.current) { suppressConcatPreviewClickRef.current = false; return } setConcatPreviewIndex(index) }}><span className="concat-preview-index">{index + 1}.</span><span className="concat-preview-name">{file.name}</span></button></Tooltip>)}</div>{concatPreviewDrag && createPortal(<div ref={concatPreviewDragGhostRef} className="concat-preview-drag-ghost">{files.find(file => file.id === concatPreviewDrag)?.name}</div>, document.body)}<small className="concat-preview-scroll-hint">{isVideoConcat ? '文件较多时可横向滚动浏览；拖动卡片调整顺序' : '音频较多时可横向滚动浏览；拖动卡片调整顺序'}</small></div>}
+    <Modal title={isVideoConcat ? '视频拼接顺序预览' : '音频拼接顺序预览'} centered open={concatPreviewOpen} onCancel={closeConcatPreview} footer={<Button onClick={closeConcatPreview}>关闭</Button>} width={760} destroyOnClose>
+      {(concatPreviewLoading || (isVideoConcat ? Boolean(concatVideoPreviewUrl) : concatPreviewUrls.length > 0)) && <div className="concat-preview-modal-content"><p>{isVideoConcat ? '预览为完整拼接视频；点击下方片段可跳转到对应片段的开始位置，拖动卡片可调整拼接顺序。' : '按待处理列表的顺序依次播放；拖动下方音频卡片可调整顺序，或在文件列表中拖动文件名调整顺序。此处用于检查顺序，最终输出仍使用下方设置的编码参数。'}</p>{isVideoConcat ? <div className="concat-preview-player-stage">{concatVideoPreviewUrl && <video ref={concatVideoRef} src={concatVideoPreviewUrl} controls playsInline preload="metadata" onLoadedMetadata={event => { const video = event.currentTarget; const index = concatVideoPendingSeekRef.current; video.currentTime = concatVideoSegmentStarts[index] ?? 0 }} onTimeUpdate={event => { const time = event.currentTarget.currentTime; const index = concatVideoSegmentStarts.findIndex((start, item) => time >= start && (item === concatVideoSegmentStarts.length - 1 || time < concatVideoSegmentStarts[item + 1])); if (index >= 0) setConcatPreviewIndex(current => current === index ? current : index) }} />}{concatPreviewLoading && <div className="concat-preview-loading-overlay"><Spin tip="正在准备完整视频预览…"/></div>}</div> : <>{concatPreviewLoading && <div className="concat-preview-loading"><Spin tip="正在准备音频预览…"/></div>}{!concatPreviewLoading && concatPreviewUrls.length > 0 && <audio key={concatPreviewUrls[concatPreviewIndex]} src={concatPreviewUrls[concatPreviewIndex]} controls autoPlay onEnded={() => setConcatPreviewIndex(index => Math.min(index + 1, concatPreviewUrls.length - 1))}/>}</>}<div className="concat-preview-current">{concatPreviewIndex + 1} / {files.length} · {files[concatPreviewIndex]?.name}</div><div className="concat-preview-list" role="list" aria-label="拼接顺序；拖动可调整">{files.map((file, index) => <Tooltip key={file.id} title={file.name}><button ref={node => { if (node) concatPreviewCardRefs.current.set(file.id, node); else concatPreviewCardRefs.current.delete(file.id) }} role="listitem" data-concat-index={index} data-concat-id={file.id} className={`concat-preview-card${index === concatPreviewIndex ? ' active' : ''}${concatPreviewDrag === file.id ? ' dragging' : ''}`} title={file.name} onPointerDown={event => startConcatPreviewDrag(event, file.id, index)} onClick={() => { if (suppressConcatPreviewClickRef.current) { suppressConcatPreviewClickRef.current = false; return } setConcatPreviewIndex(index); if (isVideoConcat) { concatVideoPendingSeekRef.current = index; const video = concatVideoRef.current; if (video) video.currentTime = concatVideoSegmentStarts[index] ?? 0 } }}><span className="concat-preview-index">{index + 1}.</span><span className="concat-preview-name">{file.name}</span></button></Tooltip>)}</div>{concatPreviewDrag && createPortal(<div ref={concatPreviewDragGhostRef} className="concat-preview-drag-ghost">{files.find(file => file.id === concatPreviewDrag)?.name}</div>, document.body)}<small className="concat-preview-scroll-hint">{isVideoConcat ? '文件较多时可横向滚动浏览；拖动卡片调整顺序' : '音频较多时可横向滚动浏览；拖动卡片调整顺序'}</small></div>}
     </Modal>
     <Modal title={isVideoFrameCrop ? "视频画面裁剪" : "图片裁剪"} rootClassName="image-crop-modal" centered open={cropModalIndex !== null} afterOpenChange={open => { if (open) requestAnimationFrame(() => requestAnimationFrame(() => { syncCropMediaFrame(); setCropFrameReady(true) })) }} onCancel={closeImageCrop} width={860} footer={<><Button onClick={closeImageCrop}>返回</Button><Button type="primary" disabled={!cropRect.width || !cropRect.height} onClick={() => { if (cropModalIndex === null) return; setFiles(current => current.map((file, index) => index === cropModalIndex ? { ...file, crop: cropRect, outputName: `${file.name.replace(/\.[^.]+$/, '')}_crop` } : file)); closeImageCrop() }}>确认裁剪区域</Button></>}>
       {cropPreviewUrl && <div className="image-crop-content"><div ref={cropStageRef} className="image-crop-stage" onDragStart={event => event.preventDefault()} onPointerDown={beginCropSelection} onPointerMove={updateCropFromPointer} onPointerUp={event => { cropDragRef.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId) }}>{isVideoFrameCrop ? <video ref={cropVideoRef} src={cropPreviewUrl} autoPlay muted loop playsInline onLoadedMetadata={event => { const video = event.currentTarget; setCropSize([video.videoWidth, video.videoHeight]); setCropRect(current => current.width ? current : { x: 0, y: 0, width: video.videoWidth, height: video.videoHeight }); requestAnimationFrame(syncCropMediaFrame) }}/> : <img ref={cropImageRef} src={cropPreviewUrl} alt="裁剪预览" draggable={false} onDragStart={event => event.preventDefault()} onLoad={event => { const image = event.currentTarget; setCropSize([image.naturalWidth, image.naturalHeight]); setCropRect(current => current.width ? current : { x: 0, y: 0, width: image.naturalWidth, height: image.naturalHeight }); requestAnimationFrame(syncCropMediaFrame) }}/>}{cropSize[0] > 0 && cropFrameReady && cropMediaFrame.width > 0 && cropMediaFrame.height > 0 && <div className="image-crop-selection" onPointerDown={beginCropMove} style={{ left: cropMediaFrame.left + cropRect.x / cropSize[0] * cropMediaFrame.width, top: cropMediaFrame.top + cropRect.y / cropSize[1] * cropMediaFrame.height, width: cropRect.width / cropSize[0] * cropMediaFrame.width, height: cropRect.height / cropSize[1] * cropMediaFrame.height }}>{['nw', 'ne', 'sw', 'se'].map(handle => <span key={handle} className={'image-crop-handle ' + handle} onPointerDown={event => beginCropResize(event, handle)}/>)}</div>}</div><div className="image-crop-controls"><span>原图 {cropSize[0]} × {cropSize[1]} px</span><Select className="image-crop-aspect-select" size="small" style={{ width: 120, minWidth: 120 }} popupMatchSelectWidth={150} value={cropAspect ?? 0} onChange={value => changeCropAspect(value || null)} options={[{ value: 0, label: '自由比例' }, { value: 1, label: '1:1' }, { value: 3/4, label: '3:4' }, { value: 4/3, label: '4:3' }, { value: 16/9, label: '16:9' }, { value: 9/16, label: '9:16' }]}/>{(['x','y','width','height'] as const).map(key => <label key={key}>{({x:'X',y:'Y',width:'宽度',height:'高度'})[key]}<InputNumber min={key === 'width' || key === 'height' ? 1 : 0} max={key === 'x' || key === 'width' ? cropSize[0] : cropSize[1]} value={cropRect[key]} onChange={value => setCropRect(current => ({ ...current, [key]: Number(value || 0) }))}/></label>)}</div><small>拖动空白区域新建选区；拖动绿色框可移动，拖动四角可缩放。固定比例按裁剪结果的宽:高计算。</small></div>}

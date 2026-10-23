@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('desktop', {
   selectFolderFiles: (extensions) => ipcRenderer.invoke('folder:select', String(extensions || '').split(',').map(x => x.replace(/^\./, ''))),
   readFile: (filePath) => ipcRenderer.invoke('files:read', filePath),
   registerMediaPreview: (filePath) => ipcRenderer.invoke('media:register-preview', filePath),
+  createVideoConcatPreview: (paths, options) => ipcRenderer.invoke('media:create-video-concat-preview', { paths, options }),
   createTrimPreview: (filePath, segments, isVideo) => ipcRenderer.invoke('media:create-trim-preview', { filePath, segments, isVideo }),
   releaseMediaPreview: (previewUrl) => ipcRenderer.invoke('media:release-preview', previewUrl),
   getMediaDuration: (filePath) => ipcRenderer.invoke('media:duration', filePath),

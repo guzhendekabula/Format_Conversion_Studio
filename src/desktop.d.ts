@@ -15,6 +15,7 @@ declare global {
       selectFolderFiles: (extensions: string) => Promise<{ path: string; name: string; size: number }[]>
       readFile: (path: string) => Promise<number[]>
       registerMediaPreview: (path: string) => Promise<string>
+      createVideoConcatPreview: (paths: string[], options?: Record<string, unknown>) => Promise<string>
       createTrimPreview: (path: string, segments: { start: number; end: number }[], isVideo: boolean) => Promise<{ url: string; duration: number }>
       releaseMediaPreview: (previewUrl: string) => Promise<boolean>
       getMediaDuration: (path: string) => Promise<number>

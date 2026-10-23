@@ -7,6 +7,7 @@ const crypto = require('node:crypto')
 const { spawn } = require('node:child_process')
 const { TaskQueue } = require('./services/task-queue.cjs')
 const { getFFmpegPath } = require('./services/ffmpeg-path.cjs')
+const { runEngine } = require('./services/engine-runner.cjs')
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'media-preview', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }])
 
@@ -122,6 +123,27 @@ ipcMain.handle('media:register-preview', async (_event, filePath) => {
   if (!stat.isFile()) throw new Error('预览目标不是文件')
   const token = crypto.randomUUID()
   previewFiles.set(token, { path: filePath, temporary: false })
+  return `media-preview://source/${token}`
+})
+ipcMain.handle('media:create-video-concat-preview', async (_event, { paths, options }) => {
+  if (!Array.isArray(paths) || paths.length < 2 || paths.length > 100) throw new Error('视频列表无效')
+  for (const filePath of paths) {
+    if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) throw new Error('视频路径无效')
+    const stat = await fs.stat(filePath)
+    if (!stat.isFile()) throw new Error(`不是有效的视频文件：${path.basename(filePath)}`)
+  }
+  const tempDir = path.join(app.getPath('temp'), 'format-conversion-studio-preview')
+  await fs.mkdir(tempDir, { recursive: true })
+  const result = await runEngine({
+    operation: 'media.video-concat',
+    paths,
+    outputDir: tempDir,
+    options: { ...(options || {}), outputName: `concat-preview-${crypto.randomUUID()}` },
+  })
+  const outputPath = result.outputs?.[0]
+  if (!outputPath) throw new Error('没有生成视频预览文件')
+  const token = crypto.randomUUID()
+  previewFiles.set(token, { path: outputPath, temporary: true })
   return `media-preview://source/${token}`
 })
 ipcMain.handle('media:create-trim-preview', async (_event, { filePath, segments, isVideo }) => {
